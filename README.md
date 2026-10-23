@@ -38,15 +38,6 @@ curl -fsSL https://raw.githubusercontent.com/bdsanxz/peers/main/install.sh | sh 
 
 The script needs `curl` and `tar`, and `cargo` only to build from source. It prints the installed version, and tells you when the install directory is not on your `PATH`.
 
-### While the repository is private
-
-GitHub serves a private repository's files only with a token. The install script uses `GITHUB_TOKEN`, or the token of the GitHub CLI when you are signed in with `gh auth login`. Fetch the script with the same token:
-
-```bash
-curl -fsSL -H "Authorization: Bearer $(gh auth token)" \
-  https://raw.githubusercontent.com/bdsanxz/peers/main/install.sh | sh
-```
-
 ### Prebuilt binaries
 
 | Release | Binaries |
