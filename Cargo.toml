@@ -1,0 +1,21 @@
+[package]
+name = "peers"
+version = "0.1.0"
+edition = "2021"
+description = "Inbox messenger between OpenCode, Claude Code and Antigravity agent sessions on one machine"
+publish = false
+
+[[bin]]
+name = "peers"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4.6", features = ["derive"] }
+libc = "0.2"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = true
