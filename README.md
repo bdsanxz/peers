@@ -1,22 +1,90 @@
 # peers
 
-An inbox messenger between agent sessions on one machine: OpenCode, Claude Code and the Antigravity CLI (`agy`), in any direction. It is the command-line tool behind the `peers` agent skill.
+An inbox messenger between AI agent sessions on one machine: OpenCode, Claude Code and the Antigravity CLI (`agy`), in any direction. It is the command-line tool behind the `peers` agent skill.
 
-A session sends a message with `peers send`. The message is stored, and the receiver gets only a one-line notification:
+One session sends a message with `peers send`. The message is stored in a chat that keeps its whole history, and the receiver gets only a one-line notification as an ordinary turn:
 
 ```
 New message from Rina (backend) (backend). You have 3 unread messages in your inbox. Read it with: peers open claude:<uuid>
 ```
 
-The receiver reads the chat with `peers open`. Each chat keeps its full history, like a messaging app.
+The receiver reads the chat with `peers open` and answers with its own `peers send`. Nobody polls: each runtime gets the notification its own way.
+
+- **OpenCode:** steered into the session through its background service.
+- **Claude Code:** through the `peers channel` MCP server, or a `peers watch` Monitor. A stopped session is resumed headless.
+- **Antigravity:** typed into an `agy` TUI running in herdr, or run headless.
 
 ## Install
 
+### With the install script
+
 ```bash
+curl -fsSL https://raw.githubusercontent.com/bdsanxz/peers/main/install.sh | sh
+```
+
+This downloads the prebuilt binary for your machine from the latest release and checks its SHA-256. It installs it as `~/.local/bin/peers`, one global binary that every agent on the machine can use. When the release has no binary for your machine, it builds that release from source with `cargo`.
+
+Options go after `sh -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bdsanxz/peers/main/install.sh | sh -s -- --version v0.0.1 --dir ~/bin
+```
+
+| Option | Environment variable | Default | Use |
+| --- | --- | --- | --- |
+| `--version vX.Y.Z` | `PEERS_VERSION` | `latest` | The release to install. |
+| `--dir DIR` | `PEERS_INSTALL_DIR` | `~/.local/bin` | Where the binary goes. |
+| `--from-source` | | | Build the release with `cargo` instead of downloading a binary. |
+
+The script needs `curl` and `tar`, and `cargo` only to build from source. It prints the installed version, and tells you when the install directory is not on your `PATH`.
+
+### While the repository is private
+
+GitHub serves a private repository's files only with a token. The install script uses `GITHUB_TOKEN`, or the token of the GitHub CLI when you are signed in with `gh auth login`. Fetch the script with the same token:
+
+```bash
+curl -fsSL -H "Authorization: Bearer $(gh auth token)" \
+  https://raw.githubusercontent.com/bdsanxz/peers/main/install.sh | sh
+```
+
+### Prebuilt binaries
+
+| Release | Binaries |
+| --- | --- |
+| `v0.0.1` | `aarch64-apple-darwin` (macOS on Apple silicon) |
+
+Each binary is `peers-<target>.tar.gz` on the release page, with its `.sha256` next to it. Other machines (Intel macOS, Linux on x86_64 or arm64) build from source through the install script. The Linux build is not tested yet.
+
+### From source
+
+With Rust installed (https://rustup.rs):
+
+```bash
+git clone https://github.com/bdsanxz/peers.git
+cd peers
 cargo install --path . --root ~/.local
 ```
 
-This puts one global binary at `~/.local/bin/peers` that every agent on the machine can use. Run `peers --version` to check it is on `PATH`.
+Run `peers --version` to check that the binary is on your `PATH`.
+
+### Uninstall
+
+```bash
+rm ~/.local/bin/peers
+rm -rf ~/.local/cache/peers   # also deletes every chat and peer profile
+```
+
+## Use it from an agent
+
+Agents use `peers` through the `peers` agent skill, which tells them when to message, how to start peers and how to answer. Without the skill, give an agent its two commands: `peers open <your address>` to read your messages, and `peers send <your address> --kind <kind> --seq <n> --body "<text>"` to reply.
+
+For a Claude Code session to get notifications as turns, start it with the peers channel:
+
+```bash
+claude --mcp-config "$(peers channel-config)" --dangerously-load-development-channels server:peers
+```
+
+A Claude Code session started without it, such as one in the desktop app, runs `peers watch` in a Monitor instead.
 
 ## Commands
 
@@ -24,7 +92,7 @@ This puts one global binary at `~/.local/bin/peers` that every agent on the mach
 | --- | --- |
 | `peers whoami` | Prints this session's address, such as `claude:<uuid>` or `opencode:ses_...`. |
 | `peers list [--all-dirs] [--all] [--children]` | Lists live and recent sessions of every runtime. |
-| `peers send <address> --kind <kind> --seq <n> [--body TEXT]` | Stores a message and notifies the receiver. |
+| `peers send <address> --kind <kind> --seq <n> --body TEXT` | Stores a message and notifies the receiver. The body may come on stdin instead of `--body`. |
 | `peers contacts` | Lists every peer profile in the squad's database. |
 | `peers chats` (or `peers inbox`) | Lists your chats with their unread counts, and whether the peer has read your last message. |
 | `peers open <address> [--page N]` | Prints one page of a chat: 20 messages, with page 1 the newest. It marks the messages it prints as read. |
@@ -33,19 +101,22 @@ This puts one global binary at `~/.local/bin/peers` that every agent on the mach
 | `peers channel` / `peers channel-config` | The MCP channel server that pushes notifications into a Claude Code session as turns, and the `--mcp-config` JSON that loads it. |
 | `peers show <address> [--last N]` | Prints the last turns of a session's own transcript. |
 
-Every command has `--help` with its details, output and exit codes. Exit code 2 means a usage error or a failed command, and the error line says why.
+Every command has `--help` with its details, output and exit codes. Exit code 2 means a usage error or a failed command, and the error line says why. Every command also takes `--squad <dir>` to use that squad's database.
+
+A message's kind is one of `request`, `ack`, `progress`, `completion`, `receipt` and `notice`. Its `--seq` ties the messages of one exchange together.
 
 ## Storage
 
 Conversations and peer profiles live in one SQLite database per squad, at `~/.local/cache/peers/<dashed directory>/bd.sql`:
 
-- **The directory.** This is the nearest directory at or above the session's own directory that holds `roster.json` (the squad workspace). Without one, the session directory itself is used.
-- **The folder name.** It is the directory path with every character other than a letter, digit or dash turned into a dash, the way Claude Code names its project folders.
-- **Squad members.** Members in their own subdirectories share the squad's database.
+- **The directory.** It is the nearest directory at or above the session's own directory that holds `roster.json` (a squad workspace). Without one, the session's directory itself is used.
+- **The folder name.** It is the directory's path with every character other than a letter, digit or dash turned into a dash, the way Claude Code names its project folders.
+- **Squad members** in their own subdirectories share the squad's database.
 - **Outside sessions.** A session outside the squad joins a squad's chats with `--squad <workspace>`. Notifications sent to it name that flag.
 - **Messages.** Each message is stored once.
-- **Deleting a chat.** It records how far the deleter's view is cleared. The other side's view stays unchanged.
-- **Notifications.** A session's notifications wait in its own squad's database, for its channel or `peers watch` to pick up.
+- **Deleting a chat** records how far the deleter's view is cleared. The other side's view stays unchanged.
+- **Notifications** wait in the receiving session's own squad database until its channel or `peers watch` picks them up.
+- **Logs** of headless runs started for a peer go to `logs/` next to the database.
 
 Environment variables:
 
@@ -64,4 +135,29 @@ cargo test
 cargo clippy --all-targets
 ```
 
-The tests in `tests/cli.rs` run the binary against stubs of the `claude`, `opencode`, `agy` and `herdr` CLIs, each test in its own temporary home and cache.
+The tests in `tests/cli.rs` run the binary against stubs of the `claude`, `opencode`, `agy` and `herdr` CLIs. Each test gets its own temporary home and cache.
+
+### Releasing
+
+1. Set the new `version` in `Cargo.toml`, run `cargo test`, and commit.
+2. Build and package each target's binary:
+
+   ```bash
+   cargo build --release --locked
+   T=aarch64-apple-darwin
+   tar -C target/release -czf peers-$T.tar.gz peers
+   shasum -a 256 peers-$T.tar.gz > peers-$T.tar.gz.sha256
+   ```
+
+3. Tag the commit and publish the release with the files:
+
+   ```bash
+   git tag v<version> && git push origin v<version>
+   gh release create v<version> peers-$T.tar.gz peers-$T.tar.gz.sha256 --title "peers v<version>" --notes "..."
+   ```
+
+The install script finds a binary by its asset name, `peers-<target>.tar.gz`, so keep that name for every target.
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).

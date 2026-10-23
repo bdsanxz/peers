@@ -1,8 +1,10 @@
 [package]
 name = "peers"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "Inbox messenger between OpenCode, Claude Code and Antigravity agent sessions on one machine"
+repository = "https://github.com/bdsanxz/peers"
+license = "GPL-3.0-or-later"
 publish = false
 
 [[bin]]
