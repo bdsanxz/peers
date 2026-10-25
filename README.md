@@ -115,7 +115,7 @@ Environment variables:
 | --- | --- |
 | `PEERS_SELF` | This session's address, when no runtime variable gives it. |
 | `PEERS_CWD` | This session's directory, when its runtime cannot tell it. |
-| `PEERS_ROLE`, `PEERS_NAME` | The sender's role and human-readable name. The nearest `.peers.json` gives them otherwise. |
+| `PEERS_ROLE`, `PEERS_NAME` | The sender's role and human-readable name. The nearest `.peers.json` gives them otherwise. Write the name without the role, such as `Rina`: `peers` adds the role itself and shows `Rina (backend)`. |
 | `PEERS_CACHE` | Another cache root instead of `~/.local/cache/peers`. |
 | `AGY_HOME` | Antigravity's data directory, when it is not `~/.gemini/antigravity-cli`. |
 

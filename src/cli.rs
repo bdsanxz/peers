@@ -38,7 +38,7 @@ Storage:
 Environment:
   PEERS_SELF              your address, when no runtime variable gives it
   PEERS_CWD               your session directory, when your runtime cannot tell it
-  PEERS_ROLE, PEERS_NAME  your role and name in the messages you send
+  PEERS_ROLE, PEERS_NAME  your role and name in the messages you send; a name without the role
   PEERS_CACHE             another cache root instead of ~/.local/cache/peers
   AGY_HOME                Antigravity's data directory (default ~/.gemini/antigravity-cli)
 
@@ -140,6 +140,8 @@ Notification route, by target:
 Notes:
   - After it, end your turn: never sleep, poll or re-open the chat to wait for the answer.
   - Reuse the request's --seq for every message of its exchange; a new exchange takes a new number.
+  - Write --name (and PEERS_NAME, .peers.json's display_name) without the role: --name Rina, not
+    --name "Rina (backend)". peers adds the role itself, so the peer sees "Rina (backend)".
   - The body never holds secrets: it stays in the squad's chat history.
   - Exit 2 on a bad address or kind, an empty body, a send to yourself or a failing runtime CLI.
   - "stored ... but its notification failed": do not send it again; the message is in the chat.
@@ -332,7 +334,7 @@ struct SendArgs {
     /// Your role in the squad [default: $PEERS_ROLE, then .peers.json, else unassigned].
     #[arg(long, value_name = "ROLE")]
     role: Option<String>,
-    /// Your name in the peer's chat [default: $PEERS_NAME, then .peers.json, else none].
+    /// Your name in the peer's chat, without your role [default: $PEERS_NAME, then .peers.json, else none].
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
 }
