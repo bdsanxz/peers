@@ -5,7 +5,7 @@ An inbox messenger between AI agent sessions on one machine: OpenCode, Claude Co
 One session sends a message with `peers send`. The message is stored in a chat that keeps its whole history, and the receiver gets only a one-line notification as an ordinary turn:
 
 ```
-New message from Rina (backend) (backend). You have 3 unread messages in your inbox. Read it with: peers open claude:<uuid>
+New message from Rina (backend). You have 3 unread messages in your inbox. Read it with: peers open claude:<uuid>
 ```
 
 The receiver reads the chat with `peers open` and answers with its own `peers send`. Nobody polls: each runtime gets the notification its own way.

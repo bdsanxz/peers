@@ -560,6 +560,8 @@ fn role_and_name_come_from_flags_env_and_peers_json() {
     let d = e.dir("w");
     let member = e.dir("member/repo/src");
     fs::write(e.tmp.join("member/.peers.json"), r#"{"role": "frontend", "squad": "s", "display_name": "Fia (frontend)"}"#).unwrap();
+    e.set_claude_live(&[(B, &d)]);
+    e.ok(B, &d, &["chats"]);
     e.send(A, &d, B, "1", "default");
     e.ok(A, &d, &["send", B, "--kind", "notice", "--seq", "2", "--role", "lead", "--name", "Lena\n (lead)", "--body", "flags"]);
     e.run_env(Some(A), &d, &[("PEERS_ROLE", "ops"), ("PEERS_NAME", "Oki")], &["send", B, "--kind", "notice", "--seq", "3", "--body", "env"], None);
@@ -571,6 +573,13 @@ fn role_and_name_come_from_flags_env_and_peers_json() {
     };
     in_member(&["send", B, "--kind", "notice", "--seq", "4", "--body", "file"]);
     in_member(&["send", B, "--kind", "notice", "--seq", "5", "--role", "user", "--body", "user"]);
+    // The notification names the sender with its role once, even when the name holds it.
+    let lines = e.watch_lines(B, &d, 5);
+    assert_eq!(lines.len(), 5, "expected five notifications, got {lines:?}");
+    has(&lines[0], &format!("New message from {A} (unassigned). You have"));
+    has(&lines[1], "New message from Lena (lead). You have");
+    has(&lines[2], "New message from Oki (ops). You have");
+    has(&lines[3], "New message from Fia (frontend). You have");
     let page = e.ok(B, &d, &["open", A]);
     // Each bubble carries the name the message was sent under, and its role when that differs from
     // the CHAT line's and the name does not hold it. Without a name it is "partner"; without a role

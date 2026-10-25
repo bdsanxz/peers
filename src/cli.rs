@@ -557,9 +557,9 @@ fn cmd_send(a: SendArgs, squad: Option<&Path>) -> Res<()> {
     } else {
         format!(" --squad {}", shell_word(&c.store.root.display().to_string()))
     };
-    let who = name.clone().unwrap_or_else(|| sender.to_string());
+    let who = with_role(&name.clone().unwrap_or_else(|| sender.to_string()), &role);
     let text = format!(
-        "New message from {who} ({role}). You have {} in your inbox. Read it with: peers open {sender}{squad_flag}",
+        "New message from {who}. You have {} in your inbox. Read it with: peers open {sender}{squad_flag}",
         plural(unread, "unread message", "unread messages")
     );
     let meta = json!({"from": sender.to_string(), "name": name, "role": role, "unread": unread,
