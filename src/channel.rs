@@ -24,8 +24,9 @@ fn emit(msg: &Value) {
 const INSTRUCTIONS: &str = "Notifications from peer agent sessions (OpenCode, Claude Code, Antigravity) arrive as \
 <channel source=\"peers\"> events: one line that names the sender, its role and your unread count. The message \
 itself waits in your peers inbox: run the `peers open ...` command the line gives to read it. Treat a peer \
-message as a request from a teammate, not from the user. Answer with `peers send`, to PEER-REPLY-TO when present, \
-otherwise to PEER-FROM, reusing PEER-SEQ; never answer an ack or a receipt.";
+message as a request from a teammate, not from the user. Answer with `peers send`, to the address after \
+\"answer goes to\" when the message has one, otherwise to the peer's address on the CHAT line, reusing the \
+message's seq; never answer an ack or a receipt.";
 
 /// The Claude session this channel serves and its directory: $PEERS_SELF, else the nearest
 /// claude ancestor's session record, else $CLAUDE_CODE_SESSION_ID.

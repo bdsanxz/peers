@@ -20,11 +20,16 @@ pub fn now_ms() -> i64 {
 }
 
 pub fn local_time(ms: i64) -> String {
+    local_fmt(ms, "%Y-%m-%d %H:%M:%S")
+}
+
+/// A millisecond timestamp in local time, in a chrono format such as "%H:%M".
+pub fn local_fmt(ms: i64, fmt: &str) -> String {
     use chrono::TimeZone;
     chrono::Local
         .timestamp_millis_opt(ms)
         .single()
-        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|t| t.format(fmt).to_string())
         .unwrap_or_else(|| ms.to_string())
 }
 

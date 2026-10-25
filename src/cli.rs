@@ -10,42 +10,53 @@ use serde_json::json;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
-const ABOUT: &str = "Inbox messenger between OpenCode, Claude Code and Antigravity agent sessions on this machine.";
+const ABOUT: &str = "peers — inbox messenger between agent sessions on this machine (OpenCode, Claude Code, Antigravity)";
 
-const LONG_ABOUT: &str = "Inbox messenger between OpenCode, Claude Code and Antigravity agent sessions on this machine.
+const AFTER_HELP: &str = r#"How it works:
+  1. peers send <peer> --kind request --seq 1 --body "<text>"
+     stores the message; the peer gets only one notification line:
+     New message from <name> (<role>). You have 1 unread message in your inbox. Read it with: peers open <you>
+  2. The peer runs that `peers open`, then answers with its own `peers send`.
+  3. The answer reaches you the same way, as a new turn. Nobody polls.
 
-A peer's address is <runtime>:<id>: opencode:<ses_...>, claude:<session uuid> or
-antigravity:<conversation uuid>.
+Addresses:
+  opencode:<ses_...>               an OpenCode session
+  claude:<session uuid>            a Claude Code session
+  antigravity:<conversation uuid>  an Antigravity conversation
 
-`send` stores a message in the squad's database and gives the receiver only a one-line
-notification: \"New message from <name> (<role>). You have <n> unread messages in your inbox.
-Read it with: peers open <sender>\". The receiver then reads the chat with `open`. Every chat
-keeps its full history; `chats` lists them, `contacts` lists the peers, and `delete` hides a
-chat from your own view only.
+For agents:
+  - After a send, end your turn: never sleep, poll, loop or re-open to wait for the answer.
+  - Read with the exact command the notification gives, its --squad flag included.
+  - Answer with the message's --seq, to `answer goes to <addr>` when it has one, else to the chat's peer.
+  - Run `peers <command> --help` before you first use a command.
 
-Conversations and peer profiles live in one SQLite database per squad:
-~/.local/cache/peers/<dashed directory>/bd.sql, where the directory is the nearest one at or
-above your session directory that holds roster.json (the squad workspace), else your session
-directory itself. --squad <dir> uses another squad's database. $PEERS_CACHE moves the cache
-root; $PEERS_CWD sets your session directory when your runtime cannot tell it.
+Storage:
+  ~/.local/cache/peers/<dashed squad dir>/bd.sql   one SQLite database per squad
+  squad dir       nearest directory at or above your session's that holds roster.json, else your session's
+  --squad <dir>   use that squad's database instead
 
-Run `peers <command> --help` for one command.";
+Environment:
+  PEERS_SELF              your address, when no runtime variable gives it
+  PEERS_CWD               your session directory, when your runtime cannot tell it
+  PEERS_ROLE, PEERS_NAME  your role and name in the messages you send
+  PEERS_CACHE             another cache root instead of ~/.local/cache/peers
+  AGY_HOME                Antigravity's data directory (default ~/.gemini/antigravity-cli)
 
-const AFTER_HELP: &str = "Examples:
+Exit codes:
+  0  success
+  2  usage error or failed command; the error line says why
+
+Examples:
   peers whoami
-  peers list --all-dirs
-  peers send opencode:ses_abc --kind request --seq 1 --body \"Review api/.\"
+  peers send opencode:ses_abc --kind request --seq 1 --body "Review api/."
   peers chats
-  peers open claude:<uuid>
-  peers open claude:<uuid> --page 2
-
-Exit codes: 0 on success, 2 on a usage error or a failed command (the error line says why).";
+  peers open claude:<uuid>"#;
 
 #[derive(Parser)]
-#[command(name = "peers", version, about = ABOUT, long_about = LONG_ABOUT, after_help = AFTER_HELP)]
+#[command(name = "peers", version, about = ABOUT, after_help = AFTER_HELP)]
 pub struct Cli {
-    /// Use the database of this squad workspace (any directory) instead of your own squad's.
-    #[arg(long, global = true, value_name = "DIR")]
+    /// Use this squad's database (any directory) instead of your own squad's.
+    #[arg(long, global = true, value_name = "DIR", display_order = 100)]
     squad: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -54,28 +65,42 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Print this session's peer address.
-    #[command(
-        long_about = "Print this session's peer address.\n\n\
-Reads OPENCODE_SESSION_ID, CLAUDE_CODE_SESSION_ID or ANTIGRAVITY_CONVERSATION_ID; when several
-are set, the nearest runtime process among the ancestors decides. $PEERS_SELF=<address>
-overrides them all. Also records your profile in your squad's database, so your squad sees
-you in `peers contacts`.
-Output: one line, the address. Fails (exit 2) outside an agent session.",
-        after_help = "Examples:\n  peers whoami"
-    )]
+    /// Print this session's peer address
+    #[command(after_help = r#"Output:
+  claude:<uuid>                  this session's address, one line
+
+Identity, first match wins:
+  PEERS_SELF=<address>           overrides everything below
+  OPENCODE_SESSION_ID            OpenCode
+  CLAUDE_CODE_SESSION_ID         Claude Code
+  ANTIGRAVITY_CONVERSATION_ID    Antigravity
+  (when several are set, the nearest runtime process among your ancestors decides)
+
+Notes:
+  - Also records your profile, so your squad sees you in `peers contacts`.
+  - Exit 2 outside an agent session.
+
+Examples:
+  peers whoami"#)]
     Whoami,
 
-    /// List live and recent sessions of every runtime.
-    #[command(
-        long_about = "List live and recent sessions of every runtime.\n\n\
-Asks each runtime, not the database. By default only sessions whose directory is the current
-directory, without your own session, finished Claude background sessions or OpenCode child
-sessions.
-Output: one line per session: address, kind, status and name (and cwd with --all-dirs).
-Nothing is printed when no session matches.",
-        after_help = "Examples:\n  peers list\n  peers list --all-dirs --all"
-    )]
+    /// List live and recent sessions of every runtime
+    #[command(after_help = r#"Output:
+  claude:<uuid>  kind=<kind>  status=<status>  name="<name>"  [cwd=<dir>]
+  one line per session; nothing when none matches
+
+Default filter, each lifted by a flag:
+  only sessions in this directory      --all-dirs (also prints cwd=)
+  no finished Claude background ones   --all
+  no OpenCode child sessions           --children
+  never your own session
+
+Notes:
+  - Asks each runtime directly, not the peers database.
+
+Examples:
+  peers list
+  peers list --all-dirs --all"#)]
     List {
         /// Include sessions in every directory, and show each one's cwd.
         #[arg(long)]
@@ -88,118 +113,191 @@ Nothing is printed when no session matches.",
         children: bool,
     },
 
-    /// Send one message to a peer: store it, then notify the peer.
+    /// Store one message in the chat with a peer, then notify the peer
     #[command(
-        long_about = "Send one message to a peer: store it, then notify the peer.\n\n\
-Stores the body with its PEER-FROM, PEER-ROLE, PEER-KIND, PEER-SEQ (and PEER-NAME,
-PEER-REPLY-TO) headers in the squad's database, then delivers only a one-line notification by
-the target's runtime: steered into an OpenCode session, queued for a live Claude session's
-channel or watch, a headless resume of a stopped Claude session, typed into an agy TUI in
-herdr, or a headless agy run.
-Output: a SENT line saying how it went, then for a request, notice or completion a REPLY line
-saying how the answer will reach you.
-Fails (exit 2) on a bad address or kind, an empty body, a send to yourself, or a runtime CLI
-that is missing or fails; when only the notification failed, the error says the message is
-stored.",
         override_usage = "peers send <TARGET> --kind <KIND> --seq <N> (--body <TEXT> | <body on stdin>) [OPTIONS]",
-        after_help = "Examples:
-  peers send opencode:ses_abc --kind request --seq 1 --body \"Summarize README.md.\"
+        after_help = r#"Output:
+  SENT <target>: stored in its inbox (1 unread message); notified via channel (...)
+  REPLY: <how the answer will reach you>. End your turn now. ...
+  REPLY comes after a request, notice or completion; with --reply-to it names where the answer goes.
+
+Kinds:
+  request      asks for work; answered by one completion
+  ack          confirms a request: restates its scope, or asks specific questions
+  progress     a blocker, a decision request or missing input
+  completion   the single final result of a request
+  receipt      closes the exchange: OK, or NO and why; never answered
+  notice       information that needs no work; answered by a receipt
+
+Notification route, by target:
+  opencode:<id>                       steered into the session, running or not
+  claude:<uuid>, live                 queued for its peers channel or `peers watch`
+  claude:<uuid>, stopped              resumed headless with `claude -p --resume`
+  antigravity:<uuid>, TUI in herdr    typed into the agy TUI
+  antigravity:<uuid>, closed          run headless with `agy -p`, one run at a time, in order
+  antigravity:<uuid>, TUI elsewhere   refused before anything is stored
+
+Notes:
+  - After it, end your turn: never sleep, poll or re-open the chat to wait for the answer.
+  - Reuse the request's --seq for every message of its exchange; a new exchange takes a new number.
+  - The body never holds secrets: it stays in the squad's chat history.
+  - Exit 2 on a bad address or kind, an empty body, a send to yourself or a failing runtime CLI.
+  - "stored ... but its notification failed": do not send it again; the message is in the chat.
+
+Examples:
+  peers send opencode:ses_abc --kind request --seq 1 --body "Summarize README.md."
   peers send claude:<uuid> --kind completion --seq 1 < result.md
-  peers send antigravity:<uuid> --kind request --seq 2 --reply-to opencode:ses_boss --body \"...\""
+  peers send antigravity:<uuid> --kind request --seq 2 --reply-to opencode:ses_boss --body "...""#
     )]
     Send(SendArgs),
 
-    /// List your contacts: every peer profile in the squad's database.
-    #[command(
-        long_about = "List your contacts: every peer profile in the squad's database.\n\n\
-A session records its profile (address, name, role, runtime, directory) the first time it
-runs any peers command, and a peer you message is recorded too.
-Output: one line per contact, the most recently active first.",
-        after_help = "Examples:\n  peers contacts\n  peers contacts --squad ~/squads/shop"
-    )]
+    /// List every peer profile in the squad's database
+    #[command(after_help = r#"Output:
+  claude:<uuid>  name="Lena"  role=lead  runtime=claude  cwd=<dir>  seen=<time>
+  one line per peer, most recently active first; never you
+
+Notes:
+  - A session is recorded the first time it runs any peers command, or once you message it.
+
+Examples:
+  peers contacts
+  peers contacts --squad ~/squads/shop"#)]
     Contacts,
 
-    /// List your chats with their unread counts; also `peers inbox`.
+    /// List your chats, newest first, with their unread counts
     #[command(
         visible_alias = "inbox",
-        long_about = "List your chats with their unread counts; also `peers inbox`.\n\n\
-Output: an INBOX line with your unread total, then one line per chat, the most recent first:
-the peer's address, name, role, unread and total message counts, and the last message with its
-kind and sequence number. When you sent the last message, the line also says whether the peer
-has read it (`not read yet` or `read <time>`).",
-        after_help = "Examples:\n  peers chats\n  peers inbox --squad ~/squads/shop"
+        after_help = r#"Output:
+  INBOX <you> in <squad dir>: 2 unread messages in 3 chats
+  claude:<uuid>  name="Lena"  role=lead  unread=2  messages=9  last=<time> from them [ack seq 3]: On it.
+  claude:<uuid>  name="Oki"  role=ops  unread=0  messages=4  last=<time> from you [notice seq 2, not read yet]: ...
+  OPEN: peers open claude:<uuid>
+
+Markers:
+  from them | from you             who sent the chat's last message
+  [<kind> seq <n>]                 the last message's kind and exchange
+  not read yet | read <time>       on your last message: whether the peer has read it
+  OPEN: <command>                  the chat to open next: the newest with unread messages, else the newest
+
+Notes:
+  - Run it once when you start or resume; never loop on it to wait for a reply.
+
+Examples:
+  peers chats
+  peers inbox --squad ~/squads/shop"#
     )]
     Chats,
 
-    /// Open a chat and print one page of its history.
-    #[command(
-        long_about = "Open a chat and print one page of its history.\n\n\
-Page 1 holds the newest 20 messages, page 2 the 20 before them, and so on; each page prints
-its messages oldest first, each with its PEER- headers and body. The messages printed are
-marked read; when older pages still hold unread messages, an OLDER line says so.
-Fails (exit 2) when the page does not exist.",
-        after_help = "Examples:\n  peers open claude:<uuid>\n  peers open opencode:ses_abc --page 2"
-    )]
+    /// Print one page of a chat, like a messenger: you and the peer
+    #[command(after_help = "Output:
+  CHAT with Lena (lead) · claude:<uuid>           the peer: name (role) · address
+  page 1 of 2  (messages 21-40 of 40, ...)        20 messages a page, oldest first
+
+  ── 2026-10-26 ──                                a new day
+  [you] #21 10:00  request seq 3 · read 10:01     your message; read or not read yet
+    Review api/.                                  the body, indented
+  ── 1 unread message ──                          unread messages start here
+  [Lena] #22 10:05  ack seq 3 · new               the peer's message, by its name
+
+  OLDER: peers open claude:<uuid> --page 2        older messages (and unread ones there)
+  INBOX: 0 unread messages left in your inbox     unread in all your chats
+
+Markers on the peer's line:
+  new                     not read before this command printed it
+  answer goes to <addr>   reply to <addr>, not to the peer
+  as <role>               sent under another role than the CHAT line's
+  [partner]               the peer has no name
+
+Reply:
+  peers send <TARGET> --kind <kind> --seq <its seq> --body \"<text>\"
+
+Notes:
+  - Printing marks the messages read: read all of it, never pipe it through head or tail.
+  - Unread messages on an OLDER page: open that page too before you act.
+  - Exit 2 when the page does not exist.
+
+Examples:
+  peers open claude:<uuid>
+  peers open opencode:ses_abc --page 2")]
     Open {
-        /// The peer's address.
+        /// The peer's address, such as claude:<uuid>.
         target: String,
-        /// Page to print; 1 is the newest.
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(i64).range(1..))]
+        /// Page to print; 1 holds the newest 20 messages.
+        #[arg(long, default_value_t = 1, value_name = "N", value_parser = clap::value_parser!(i64).range(1..))]
         page: i64,
     },
 
-    /// Delete a chat from your own view; the peer keeps its copy.
-    #[command(
-        long_about = "Delete a chat from your own view; the peer keeps its copy.\n\n\
-Hides every message of the chat so far from you. The peer still sees the whole chat. A new
-message in either direction starts the chat again, showing only what came after the delete.",
-        after_help = "Examples:\n  peers delete claude:<uuid>"
-    )]
+    /// Hide a chat from your own view; the peer keeps its copy
+    #[command(after_help = r#"Output:
+  DELETED your view of the chat with <peer>: 3 messages hidden from you; <peer> still sees the whole chat.
+  No chat with <peer> in your inbox; nothing deleted.
+
+Notes:
+  - Only your view: the peer keeps every message.
+  - A new message in either direction restarts the chat, showing only what came after.
+  - Delete only when the user asks, or when the exchange is closed and its history is not needed.
+
+Examples:
+  peers delete claude:<uuid>"#)]
     Delete {
-        /// The peer's address.
+        /// The peer's address, such as claude:<uuid>.
         target: String,
     },
 
-    /// Stream this session's notifications, one line each, for a Monitor.
-    #[command(
-        long_about = "Stream this session's notifications, one line each, for a Monitor.\n\n\
-For a Claude Code session without the peers channel: run it as a Monitor command. It reads
-your own squad's notification queue (ignoring --squad) and never exits on its own.",
-        after_help = "Examples:\n  peers watch"
-    )]
+    /// Stream this session's notifications, one line each, for a Monitor
+    #[command(after_help = r#"Output:
+  New message from Lena (lead). You have 1 unread message in your inbox. Read it with: peers open claude:<uuid>
+  one line per notification; it never exits on its own
+
+Notes:
+  - For a Claude Code session without the peers channel: arm it once as a Monitor command.
+  - Reads your own squad's notification queue; ignores --squad.
+
+Examples:
+  peers watch"#)]
     Watch,
 
-    /// Run the peers channel: an MCP stdio server for Claude Code.
-    #[command(
-        long_about = "Run the peers channel: an MCP stdio server for Claude Code.\n\n\
-Claude Code starts it from --mcp-config or .mcp.json; it pushes each notification for its
-session into the conversation as a turn. Do not run it by hand: it speaks JSON-RPC on stdin
-and stdout until stdin closes.",
-        after_help = "Examples:\n  claude --mcp-config \"$(peers channel-config)\" --dangerously-load-development-channels server:peers"
-    )]
+    /// Run the peers channel: an MCP stdio server for Claude Code
+    #[command(after_help = r#"Notes:
+  - Claude Code starts it from --mcp-config; do not run it by hand.
+  - Speaks MCP JSON-RPC on stdin and stdout until stdin closes.
+  - Pushes each notification for its session into the conversation as a turn.
+
+Examples:
+  claude --mcp-config "$(peers channel-config)" --dangerously-load-development-channels server:peers"#)]
     Channel,
 
-    /// Print the --mcp-config JSON that loads the peers channel.
-    #[command(
-        long_about = "Print the --mcp-config JSON that loads the peers channel.\n\n\
-Output: one line of JSON for `claude --mcp-config`, with this binary's absolute path.",
-        after_help = "Examples:\n  peers channel-config"
-    )]
+    /// Print the --mcp-config JSON that loads the peers channel
+    #[command(after_help = r#"Output:
+  {"mcpServers":{"peers":{"args":["channel"],"command":"/abs/path/to/peers"}}}
+
+Examples:
+  claude --mcp-config "$(peers channel-config)" --dangerously-load-development-channels server:peers"#)]
     ChannelConfig,
 
-    /// Print the last turns of a session's own transcript.
-    #[command(
-        long_about = "Print the last turns of a session's own transcript.\n\n\
-OpenCode and Claude: one line per turn, cut to 400 characters. Antigravity stores turns as
-protobuf, so it prints the title, status and preview instead.
-Fails (exit 2) when the session or its transcript does not exist.",
-        after_help = "Examples:\n  peers show opencode:ses_abc\n  peers show claude:<uuid> --last 10"
-    )]
+    /// Print the last turns of a session's own transcript
+    #[command(after_help = r#"Output, OpenCode and Claude:
+  user: <turn text, cut to 400 characters>
+  assistant: <turn text, cut to 400 characters>
+
+Output, Antigravity (its turns are protobuf):
+  title: <title>
+  status: <status>
+  modified: <time>
+  preview: <preview>
+
+Notes:
+  - Reads the session's own transcript, not the peers chat.
+  - Exit 2 when the session or its transcript does not exist.
+
+Examples:
+  peers show opencode:ses_abc
+  peers show claude:<uuid> --last 10"#)]
     Show {
-        /// The session's address.
+        /// The session's address, such as claude:<uuid>.
         target: String,
         /// Number of turns to print.
-        #[arg(long, default_value_t = 6)]
+        #[arg(long, default_value_t = 6, value_name = "N")]
         last: usize,
     },
 
@@ -219,23 +317,22 @@ struct SendArgs {
     /// Words after the address: a body passed by mistake, refused with a hint.
     #[arg(hide = true)]
     stray: Vec<String>,
-    /// Message kind.
-    #[arg(long, value_parser = KINDS)]
+    /// Message kind (see Kinds below).
+    #[arg(long, value_parser = KINDS, hide_possible_values = true)]
     kind: String,
-    /// Exchange number: reuse the request's number for every reply in its exchange.
+    /// Exchange number: the request's number for every message of its exchange.
     #[arg(long, value_name = "N")]
     seq: i64,
-    /// Message body (default: read from stdin).
+    /// Message body [default: stdin].
     #[arg(long, value_name = "TEXT")]
     body: Option<String>,
-    /// Address the receiver must answer, when not you (default: none; the receiver answers you).
+    /// Where the receiver must send its answer, when not to you.
     #[arg(long, value_name = "ADDRESS")]
     reply_to: Option<String>,
-    /// Your role in the squad (default: $PEERS_ROLE, then the nearest .peers.json, else "unassigned").
+    /// Your role in the squad [default: $PEERS_ROLE, then .peers.json, else unassigned].
     #[arg(long, value_name = "ROLE")]
     role: Option<String>,
-    /// Your human-readable name, sent as PEER-NAME (default: $PEERS_NAME, then the display_name in
-    /// the .peers.json that gave your role, else none).
+    /// Your name in the peer's chat [default: $PEERS_NAME, then .peers.json, else none].
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
 }
@@ -581,28 +678,56 @@ fn cmd_chats(squad: Option<&Path>) -> Res<()> {
     Ok(())
 }
 
-fn render(m: &Msg, owner: &str) {
-    let status = if m.sender == owner {
-        let read = m.read_at.map(|t| format!("read {}", local_time(t))).unwrap_or_else(|| "not read yet".into());
-        format!("sent by you to {}, {read}", m.recipient)
-    } else if m.read_at.is_none() {
-        "received, new".to_string()
+/// A name with its role, without repeating a role the name already holds.
+fn with_role(name: &str, role: &str) -> String {
+    if name.contains(&format!("({role})")) {
+        name.to_string()
     } else {
-        "received".to_string()
-    };
-    println!("=== #{} {} {status}", m.id, local_time(m.sent_at));
-    println!("PEER-FROM: {}", m.sender);
-    println!("PEER-ROLE: {}", m.sender_role);
-    if let Some(n) = &m.sender_name {
-        println!("PEER-NAME: {n}");
+        format!("{name} ({role})")
     }
-    println!("PEER-KIND: {}", m.kind);
-    println!("PEER-SEQ: {}", m.seq);
+}
+
+/// The chat partner as its profile knows it, which its messages fall back to.
+struct Partner<'a> {
+    name: &'a str,
+    role: &'a str,
+}
+
+/// One message as a chat bubble, told from your side: `[you]` for yours, the sender's name for the
+/// peer's. A peer message names its role only when it was sent under another role than the CHAT line's.
+fn render(m: &Msg, owner: &str, partner: &Partner) {
+    let day = local_fmt(m.sent_at, "%Y-%m-%d");
+    let mut meta = vec![format!("{} seq {}", m.kind, m.seq)];
     if let Some(r) = &m.reply_to {
-        println!("PEER-REPLY-TO: {r}");
+        meta.push(format!("answer goes to {r}"));
     }
-    println!("---");
-    println!("{}", m.body.trim_end());
+    let who = if m.sender == owner {
+        meta.push(match m.read_at {
+            Some(t) if local_fmt(t, "%Y-%m-%d") == day => format!("read {}", local_fmt(t, "%H:%M")),
+            Some(t) => format!("read {}", local_fmt(t, "%Y-%m-%d %H:%M")),
+            None => "not read yet".into(),
+        });
+        "you".to_string()
+    } else {
+        // A message sent without a name or role speaks as the partner its profile knows.
+        let name = m.sender_name.as_deref().filter(|n| !n.is_empty()).unwrap_or(partner.name);
+        let role = &m.sender_role;
+        if role != "unassigned" && role != partner.role && !name.contains(&format!("({role})")) {
+            meta.push(format!("as {role}"));
+        }
+        if m.read_at.is_none() {
+            meta.push("new".into());
+        }
+        if name.is_empty() { "partner".to_string() } else { name.to_string() }
+    };
+    println!("[{who}] #{} {}  {}", m.id, local_fmt(m.sent_at, "%H:%M"), meta.join(" · "));
+    for line in m.body.trim_end().lines() {
+        if line.is_empty() {
+            println!();
+        } else {
+            println!("  {line}");
+        }
+    }
     println!();
 }
 
@@ -625,14 +750,30 @@ fn cmd_open(target: &str, page: i64, squad: Option<&Path>) -> Res<()> {
     }
     let msgs = c.store.page(&owner, &peer_s, page)?;
     let (name, role) = label(c.store.profile(&peer_s)?.as_ref());
+    let partner = Partner { name: &name, role: &role };
     let last = total - (page - 1) * PAGE_SIZE;
     let first = last - msgs.len() as i64 + 1;
-    println!(
-        "CHAT {peer}  name={name:?}  role={role}  page {page} of {pages}  (messages {first}-{last} of {total}, oldest \
-         first; page 1 holds the newest)\n"
-    );
+    if name.is_empty() {
+        println!("CHAT with {peer} ({role})");
+    } else {
+        println!("CHAT with {} · {peer}", with_role(&name, &role));
+    }
+    println!("page {page} of {pages}  (messages {first}-{last} of {total}, oldest first; page 1 holds the newest)\n");
+    // Like a messenger: a line for each new day, and one above the first unread message.
+    let unread = msgs.iter().filter(|m| m.recipient == owner && m.read_at.is_none()).count() as i64;
+    let mut day = String::new();
+    let mut divided = false;
     for m in &msgs {
-        render(m, &owner);
+        let d = local_fmt(m.sent_at, "%Y-%m-%d");
+        if d != day {
+            println!("── {d} ──\n");
+            day = d;
+        }
+        if !divided && m.recipient == owner && m.read_at.is_none() {
+            println!("── {} ──\n", plural(unread, "unread message", "unread messages"));
+            divided = true;
+        }
+        render(m, &owner, &partner);
     }
     let new: Vec<i64> = msgs.iter().filter(|m| m.recipient == owner && m.read_at.is_none()).map(|m| m.id).collect();
     c.store.mark_read(&owner, &new)?;

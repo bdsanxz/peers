@@ -269,20 +269,29 @@ fn receiver_gets_only_a_notification_and_reads_the_chat() {
     has(&e.ok(A, &d, &["chats"]), "from you [notice seq 2, not read yet]: Second note.");
     let page = e.ok(B, &d, &["open", A]);
     has(&page, "page 1 of 1  (messages 1-2 of 2");
-    has(&page, &format!("PEER-FROM: {A}\nPEER-ROLE: lead\nPEER-NAME: Lena\nPEER-KIND: request\nPEER-SEQ: 1\n---\nReview api/."));
-    has(&page, "received, new");
+    // The chat reads like a messenger, told from the reader's side.
+    has(&page, &format!("CHAT with Lena (lead) · {A}\npage 1 of 1"));
+    has(&page, "──\n\n── 2 unread messages ──\n\n[Lena] #1 ");
+    // A message sent without a name still shows the partner's.
+    has(&page, "[Lena] #2 ");
+    has(&page, "  request seq 1 · new\n  Review api/.\n");
     has(&page, "INBOX: 0 unread messages left in your inbox");
     // History stays after reading, now as read.
     let again = e.ok(B, &d, &["open", A]);
-    has(&again, "Review api/.");
-    lacks(&again, "received, new");
+    has(&again, "  request seq 1\n  Review api/.\n");
+    // A message sent without a role does not name one.
+    has(&again, "  notice seq 2\n  Second note.\n");
+    lacks(&again, "unread message ──");
+    lacks(&again, " · new");
     has(&e.ok(B, &d, &["chats"]), "0 unread messages in 1 chat");
     has(&e.ok(A, &d, &["chats"]), "from you [notice seq 2, read ");
     // The sender sees its own sent messages in the same chat.
     let mine = e.ok(A, &d, &["open", B]);
-    has(&mine, &format!("sent by you to {B}, read "));
+    has(&mine, &format!("CHAT with {B} (unassigned)\npage 1 of 1"));
+    has(&mine, "[you] #2 ");
+    has(&mine, "  notice seq 2 · read ");
     lacks(&mine, "not read yet");
-    has(&mine, "Second note.");
+    has(&mine, "\n  Second note.\n");
 }
 
 #[test]
@@ -482,6 +491,8 @@ fn antigravity_headless_runs_one_at_a_time_in_order() {
     let d = e.dir("w");
     let sent = e.ok(A, &d, &["send", AGY, "--kind", "request", "--seq", "4", "--reply-to", "opencode:ses_boss", "--body", "relay me"]);
     has(&sent, &format!("SENT {AGY}: stored in its inbox (1 unread message); notified via headless resume (queued"));
+    // The chat names where the answer goes.
+    has(&e.ok(A, &d, &["open", AGY]), "  request seq 4 · answer goes to opencode:ses_boss · not read yet\n  relay me\n");
     wait_for("the first agy run", 20, || fs::read_to_string(e.home().join("agy-timeline")).unwrap_or_default().contains("end"));
     let args = fs::read_to_string(e.home().join("agy-args")).unwrap();
     has(&args, "--dangerously-skip-permissions");
@@ -561,11 +572,20 @@ fn role_and_name_come_from_flags_env_and_peers_json() {
     in_member(&["send", B, "--kind", "notice", "--seq", "4", "--body", "file"]);
     in_member(&["send", B, "--kind", "notice", "--seq", "5", "--role", "user", "--body", "user"]);
     let page = e.ok(B, &d, &["open", A]);
-    has(&page, "PEER-ROLE: unassigned\nPEER-KIND: notice\nPEER-SEQ: 1\n---\ndefault");
-    has(&page, "PEER-ROLE: lead\nPEER-NAME: Lena (lead)\nPEER-KIND: notice\nPEER-SEQ: 2");
-    has(&page, "PEER-ROLE: ops\nPEER-NAME: Oki\nPEER-KIND: notice\nPEER-SEQ: 3");
-    has(&page, "PEER-ROLE: frontend\nPEER-NAME: Fia (frontend)\nPEER-KIND: notice\nPEER-SEQ: 4");
-    has(&page, "PEER-ROLE: user\nPEER-KIND: notice\nPEER-SEQ: 5");
+    // Each bubble carries the name the message was sent under, and its role when that differs from
+    // the CHAT line's and the name does not hold it. Without a name it is "partner"; without a role
+    // it names none.
+    has(&page, &format!("CHAT with {A} (user)\n"));
+    has(&page, "[partner] #1 ");
+    has(&page, "  notice seq 1 · new\n  default\n");
+    has(&page, "[Lena (lead)] #2 ");
+    has(&page, "  notice seq 2 · new\n  flags\n");
+    has(&page, "[Oki] #3 ");
+    has(&page, "  notice seq 3 · as ops · new\n  env\n");
+    has(&page, "[Fia (frontend)] #4 ");
+    has(&page, "  notice seq 4 · new\n  file\n");
+    has(&page, "[partner] #5 ");
+    has(&page, "  notice seq 5 · new\n  user\n");
 }
 
 // ---------------------------------------------------------------------------
