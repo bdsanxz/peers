@@ -10,7 +10,7 @@ use serde_json::json;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
-const ABOUT: &str = "peers — inbox messenger between agent sessions on this machine (OpenCode, Claude Code, Antigravity)";
+const ABOUT: &str = "peers — inbox messenger between agent sessions on this machine (OpenCode, Claude Code, Antigravity, pi)";
 
 const AFTER_HELP: &str = r#"How it works:
   1. peers send <peer> --kind request --seq 1 --body "<text>"
@@ -23,6 +23,7 @@ Addresses:
   opencode:<ses_...>               an OpenCode session
   claude:<session uuid>            a Claude Code session
   antigravity:<conversation uuid>  an Antigravity conversation
+  pi:<session id>                  a pi session
 
 For agents:
   - After a send, end your turn: never sleep, poll, loop or re-open to wait for the answer.
@@ -41,6 +42,8 @@ Environment:
   PEERS_ROLE, PEERS_NAME  your role and name in the messages you send; a name without the role
   PEERS_CACHE             another cache root instead of ~/.local/cache/peers
   AGY_HOME                Antigravity's data directory (default ~/.gemini/antigravity-cli)
+  PI_CODING_AGENT_SESSION_DIR, PI_CODING_AGENT_DIR
+                          where pi saves its sessions (default ~/.pi/agent/sessions)
 
 Exit codes:
   0  success
@@ -74,6 +77,7 @@ Identity, first match wins:
   OPENCODE_SESSION_ID            OpenCode
   CLAUDE_CODE_SESSION_ID         Claude Code
   ANTIGRAVITY_CONVERSATION_ID    Antigravity
+  PI_SESSION_ID                  pi
   (when several are set, the nearest runtime process among your ancestors decides)
 
 Notes:
@@ -92,6 +96,8 @@ Examples:
 Default filter, each lifted by a flag:
   only sessions in this directory      --all-dirs (also prints cwd=)
   no finished Claude background ones   --all
+  pi: only sessions that listen through the peers extension or changed in the last 24 hours
+                                       --all
   no OpenCode child sessions           --children
   never your own session
 
@@ -105,7 +111,7 @@ Examples:
         /// Include sessions in every directory, and show each one's cwd.
         #[arg(long)]
         all_dirs: bool,
-        /// Include finished Claude background sessions.
+        /// Include finished Claude background sessions and every saved pi session.
         #[arg(long)]
         all: bool,
         /// Include OpenCode child sessions.
@@ -129,13 +135,21 @@ Kinds:
   receipt      closes the exchange: OK, or NO and why; never answered
   notice       information that needs no work; answered by a receipt
 
-Notification route, by target:
-  opencode:<id>                       steered into the session, running or not
+Notification route, by target. Nothing runs headless unless you pass --headless:
+  opencode:<id>, running or in a TUI  steered into the session; an open idle TUI starts a turn
+  opencode:<id>, neither              waits in its OpenCode inbox for the session's next turn
   claude:<uuid>, live                 queued for its peers channel or `peers watch`
-  claude:<uuid>, stopped              resumed headless with `claude -p --resume`
+  claude:<uuid>, stopped              queued for when it next starts with the channel or a watch
   antigravity:<uuid>, TUI in herdr    typed into the agy TUI
-  antigravity:<uuid>, closed          run headless with `agy -p`, one run at a time, in order
-  antigravity:<uuid>, TUI elsewhere   refused before anything is stored
+  antigravity:<uuid>, anything else   queued; the inbox keeps the message (`peers chats`)
+  pi:<id>, peers extension listening  queued for the extension; arrives as a turn
+  pi:<id>, no listener                queued for when it next starts with the peers extension
+
+With --headless, a target that is not live is run headless for one turn instead:
+  opencode   resumed in the OpenCode service
+  claude     `claude -p --resume`
+  antigravity  `agy -p`, one run at a time, in order (refused for a TUI outside herdr)
+  pi         `pi --session <file>`, one run at a time, in order
 
 Notes:
   - After it, end your turn: never sleep, poll or re-open the chat to wait for the answer.
@@ -145,6 +159,8 @@ Notes:
   - The body never holds secrets: it stays in the squad's chat history.
   - Exit 2 on a bad address or kind, an empty body, a send to yourself or a failing runtime CLI.
   - "stored ... but its notification failed": do not send it again; the message is in the chat.
+  - "queued, not delivered yet": the target is not live; nothing ran. Pass --headless only when the
+    user asked for a headless run.
 
 Examples:
   peers send opencode:ses_abc --kind request --seq 1 --body "Summarize README.md."
@@ -277,8 +293,21 @@ Examples:
   claude --mcp-config "$(peers channel-config)" --dangerously-load-development-channels server:peers"#)]
     ChannelConfig,
 
+    /// Print the pi extension that delivers notifications into pi sessions
+    #[command(after_help = r#"Output:
+  the TypeScript source of the peers extension for pi
+
+Notes:
+  - Install it once; every interactive pi session then gets its notifications as turns.
+  - It runs `peers _pi-listen` for its session; a pi session without it gets headless runs instead.
+
+Examples:
+  mkdir -p ~/.pi/agent/extensions && peers pi-extension > ~/.pi/agent/extensions/peers.ts
+  pi -e /tmp/peers.ts             (one run only, after: peers pi-extension > /tmp/peers.ts)"#)]
+    PiExtension,
+
     /// Print the last turns of a session's own transcript
-    #[command(after_help = r#"Output, OpenCode and Claude:
+    #[command(after_help = r#"Output, OpenCode, Claude and pi:
   user: <turn text, cut to 400 characters>
   assistant: <turn text, cut to 400 characters>
 
@@ -301,6 +330,22 @@ Examples:
         /// Number of turns to print.
         #[arg(long, default_value_t = 6, value_name = "N")]
         last: usize,
+    },
+
+    /// Internal: holds a pi session's listener for its peers extension.
+    #[command(name = "_pi-listen", hide = true)]
+    PiListen {
+        address: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+    },
+
+    /// Internal: runs spooled pi notifications in order.
+    #[command(name = "_drain-pi", hide = true)]
+    DrainPi {
+        id: String,
+        #[arg(long)]
+        root: PathBuf,
     },
 
     /// Internal: runs spooled Antigravity notifications in order.
@@ -337,6 +382,9 @@ struct SendArgs {
     /// Your name in the peer's chat, without your role [default: $PEERS_NAME, then .peers.json, else none].
     #[arg(long, value_name = "NAME")]
     name: Option<String>,
+    /// Run a target that is not live headless for one turn. Only when the user asked for it.
+    #[arg(long)]
+    headless: bool,
 }
 
 pub fn run(cli: Cli) -> Res<()> {
@@ -362,6 +410,12 @@ pub fn run(cli: Cli) -> Res<()> {
             Ok(())
         }
         Cmd::DrainAntigravity { cid, dir } => deliver::drain_antigravity(&cid, &dir),
+        Cmd::PiExtension => {
+            print!("{}", include_str!("pi_extension.ts"));
+            Ok(())
+        }
+        Cmd::PiListen { address, cwd } => channel::run_pi_listen(&address, cwd.as_deref()),
+        Cmd::DrainPi { id, root } => deliver::drain_pi(&id, &root),
     }
 }
 
@@ -464,6 +518,24 @@ fn cmd_list(all_dirs: bool, all: bool, children: bool) -> Res<()> {
             s.title,
         ));
     }
+    // A pi session listens while its peers extension holds a listener in its squad's database.
+    let recent = now_ms() - 24 * 3600 * 1000;
+    for s in runtime::pi_sessions() {
+        let root = squad_root(&canonical(Path::new(&s.cwd)));
+        let live = !s.cwd.is_empty()
+            && crate::store::db_dir(&root).join("bd.sql").is_file()
+            && Store::open(&root).and_then(|st| st.listener_alive(&format!("pi:{}", s.id))).unwrap_or(false);
+        if !live && !all && s.modified < recent {
+            continue;
+        }
+        rows.push((
+            format!("pi:{}", s.id),
+            "session".into(),
+            if live { "listening" } else { "saved" }.into(),
+            s.cwd,
+            s.name,
+        ));
+    }
     for (addr, kind, status, dir, name) in rows {
         if Some(&addr) == me.as_ref() || (!all_dirs && canonical(Path::new(&dir)).display().to_string() != cwd) {
             continue;
@@ -506,7 +578,7 @@ fn cmd_send(a: SendArgs, squad: Option<&Path>) -> Res<()> {
         return Err("refusing to send a message to yourself".into());
     }
     let reply_to = a.reply_to.as_deref().map(Address::parse).transpose()?;
-    deliver::precheck(&target)?;
+    deliver::precheck(&target, a.headless)?;
 
     let c = Ctx::open(squad)?;
     let (role, name) = own_identity(a.role.as_deref(), a.name.as_deref(), &[process_cwd(), c.dir.clone()]);
@@ -574,7 +646,7 @@ fn cmd_send(a: SendArgs, squad: Option<&Path>) -> Res<()> {
         }
         _ => &c.store,
     };
-    let how = deliver::notify(&target, home, &text, &meta)
+    let how = deliver::notify(&target, home, &text, &meta, a.headless)
         .map_err(|e| format!("the message is stored in {target}'s inbox, but its notification failed: {e}"))?;
     println!("SENT {target}: stored in its inbox ({}); {how}", plural(unread, "unread message", "unread messages"));
     if let Some(r) = &reply_to {
@@ -585,6 +657,16 @@ fn cmd_send(a: SendArgs, squad: Option<&Path>) -> Res<()> {
     Ok(())
 }
 
+/// Whether this session's own squad database has a live listener for it.
+fn home_listens(c: &Ctx) -> Res<bool> {
+    let home_root = squad_root(&c.dir);
+    if home_root == c.store.root {
+        c.store.listener_alive(&c.me.to_string())
+    } else {
+        Store::open(&home_root)?.listener_alive(&c.me.to_string())
+    }
+}
+
 /// How the answer reaches the sender, so it ends its turn instead of polling for it.
 fn reply_hint(c: &Ctx, target: &Address) -> Res<String> {
     let stop = "End your turn now. Do not sleep, poll, loop, re-read your inbox, list sessions or start a \
@@ -592,22 +674,25 @@ fn reply_hint(c: &Ctx, target: &Address) -> Res<String> {
     let open = format!("peers open {target}{}", c.squad_flag());
     Ok(match c.me.runtime.as_str() {
         "opencode" => format!(
-            "REPLY: a notification of the answer arrives in this session as a new user turn; read the answer then with `{open}`. {stop}"
+            "REPLY: a notification of the answer is steered into this session as a new user turn while it runs or is \
+             open in a TUI; otherwise it waits in its OpenCode inbox for its next turn. Read the answer then with \
+             `{open}`. {stop}"
         ),
         "antigravity" => format!(
-            "REPLY: a notification of the answer is typed into your agy TUI or run as a new turn after this one ends; \
+            "REPLY: a notification of the answer is typed into your agy TUI when it runs in herdr; otherwise it waits \
+             and the answer shows in `peers chats`. Read the answer then with `{open}`. {stop}"
+        ),
+        "pi" if home_listens(c)? => format!(
+            "REPLY: a notification of the answer arrives in this session through the peers extension as a new turn; \
              read the answer then with `{open}`. {stop}"
         ),
+        "pi" => format!(
+            "REPLY: this pi session has no peers extension listening, so the notification of the answer waits until \
+             this session next starts with it. Tell the user, and ask them to install the extension \
+             (`peers pi-extension --help`) and run /reload. Read the answer then with `{open}`. {stop}"
+        ),
         _ => {
-            let home_root = squad_root(&c.dir);
-            let other;
-            let home = if home_root == c.store.root {
-                &c.store
-            } else {
-                other = Store::open(&home_root)?;
-                &other
-            };
-            if home.listener_alive(&c.me.to_string())? {
+            if home_listens(c)? {
                 format!(
                     "REPLY: a notification of the answer arrives in this session through the peers channel as a new turn; \
                      read the answer then with `{open}`. {stop}"

@@ -1,7 +1,9 @@
 //! Delivers the one-line notification of a new message into the receiver's session, by its
-//! runtime: steered into OpenCode, queued for a live Claude session's channel or watch, a
-//! headless resume of a stopped Claude session, typed into an agy TUI in herdr, or a queued
-//! headless agy run.
+//! runtime, only where the session is live: steered into a running or open OpenCode session,
+//! pushed through a Claude channel or watch queue, typed into an agy TUI in herdr, or pushed
+//! through a pi session's peers extension. A session that is not live gets the notification queued
+//! for when it next opens, never a headless run, unless the sender passes --headless because the
+//! user asked for one.
 
 use crate::address::Address;
 use crate::runtime::{self, agy_home};
@@ -15,25 +17,36 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Refuses, before anything is stored, a target that no notification can reach.
-pub fn precheck(target: &Address) -> Res<()> {
-    if target.runtime == "antigravity" {
+/// What a headless run would need to know, before anything is stored: an agy TUI outside herdr
+/// would interleave with a headless run, so --headless is refused for it.
+pub fn precheck(target: &Address, headless: bool) -> Res<()> {
+    if headless && target.runtime == "antigravity" {
         if let Tui::Terminal(tty) = antigravity_tui(&target.id) {
             return Err(format!(
-                "{target} is open in an agy TUI on {tty}, outside herdr, so a notification cannot reach it \
-                 and a headless run would interleave with it; ask the user to close it there, or to run it in herdr"
+                "{target} is open in an agy TUI on {tty}, outside herdr, and a headless run would interleave \
+                 with it; send without --headless, or ask the user to close it there or to run it in herdr"
             ));
         }
     }
     Ok(())
 }
 
+/// The tail of a SENT line for a notification that waits instead of running headless.
+fn queued(reason: &str, when: &str) -> String {
+    format!(
+        "queued, not delivered yet: {reason}; it gets the notification {when}. No headless run was started; \
+         pass --headless only when the user asked for a headless run"
+    )
+}
+
 /// Delivers `text` to `target`, whose own notification queue, logs and run queues live in
-/// `home` (the database of the target's own squad). Returns how it went, for the SENT line.
-pub fn notify(target: &Address, home: &Store, text: &str, meta: &Value) -> Res<String> {
+/// `home` (the database of the target's own squad). With `headless`, a session that is not live
+/// is run headless for one turn. Returns how it went, for the SENT line.
+pub fn notify(target: &Address, home: &Store, text: &str, meta: &Value, headless: bool) -> Res<String> {
     match target.runtime.as_str() {
-        "opencode" => notify_opencode(&target.id, text),
-        "antigravity" => notify_antigravity(&target.id, home, text),
+        "opencode" => notify_opencode(&target.id, text, headless),
+        "antigravity" => notify_antigravity(target, home, text, meta, headless),
+        "pi" => notify_pi(target, home, text, meta, headless),
         _ => {
             let address = target.to_string();
             // A listening channel proves the session is live; check it before asking claude.
@@ -45,24 +58,91 @@ pub fn notify(target: &Address, home: &Store, text: &str, meta: &Value) -> Res<S
                 Ok("notified via notification queue (no peers channel is listening; the session sees it only \
                     with an armed `peers watch`, or when it next starts with the peers channel)"
                     .into())
-            } else {
+            } else if headless {
                 notify_claude_resume(&target.id, home, text)
+            } else {
+                home.push_notification(&address, text, meta)?;
+                Ok(queued(
+                    &format!("{target} is not running"),
+                    "when it next starts with the peers channel or arms `peers watch`",
+                ))
             }
         }
     }
 }
 
-fn notify_opencode(sid: &str, text: &str) -> Res<String> {
-    // Always steer: a queued prompt waits in the service and never appears in an open TUI.
-    let payload = json!({"text": text, "delivery": "steer", "resume": true}).to_string();
+/// Whether an OpenCode session is shown in a TUI: a process opened with its id; an OpenCode pane in
+/// herdr whose title names the session's title and no other session's; or an OpenCode pane in herdr
+/// working in the session's directory, when the session is the newest top-level one there (the one
+/// a TUI started in that directory shows).
+fn opencode_open(sid: &str, sessions: &[Value]) -> bool {
+    let by_args = quiet("ps", &["-ax", "-o", "args="]).lines().any(|l| {
+        let mut words = l.split_whitespace();
+        words.next().map(identity_name).as_deref() == Some("opencode") && words.any(|w| w == sid)
+    });
+    if by_args {
+        return true;
+    }
+    let Some(me) = sessions.iter().find(|s| s["id"].as_str() == Some(sid)) else { return false };
+    let panes = herdr_agents("opencode");
+    if panes.is_empty() {
+        return false;
+    }
+    if let Some(title) = me["title"].as_str().filter(|t| !t.is_empty()) {
+        if sessions.iter().filter(|s| s["title"].as_str() == Some(title)).count() == 1 {
+            let wanted = format!("OC | {title}");
+            if panes.iter().any(|(_, a)| a["terminal_title"].as_str().map(str::trim) == Some(wanted.as_str())) {
+                return true;
+            }
+        }
+    }
+    let Some(dir) = runtime::opencode_dir(me).map(|d| canonical(Path::new(&d))) else { return false };
+    let top = |s: &&Value| s["parentID"].as_str().is_none_or(|p| p.is_empty());
+    let updated = |s: &Value| s["time"]["updated"].as_i64().unwrap_or(0);
+    let newest = sessions
+        .iter()
+        .filter(top)
+        .filter(|s| runtime::opencode_dir(s).map(|d| canonical(Path::new(&d))).as_ref() == Some(&dir))
+        .max_by_key(|s| updated(s));
+    if newest.and_then(|s| s["id"].as_str()) != Some(sid) {
+        return false;
+    }
+    panes.iter().any(|(_, a)| {
+        ["foreground_cwd", "cwd"].iter().any(|k| a[*k].as_str().map(|c| canonical(Path::new(c))).as_ref() == Some(&dir))
+    })
+}
+
+fn identity_name(word: &str) -> String {
+    crate::identity::basename_lower(word)
+}
+
+fn notify_opencode(sid: &str, text: &str, headless: bool) -> Res<String> {
+    if which("opencode").is_none() {
+        return Err("opencode is not on PATH".into());
+    }
+    let sessions = runtime::opencode_sessions()?;
+    let running = sessions.iter().any(|s| s["id"].as_str() == Some(sid) && s["_status"].as_str() == Some("running"));
+    let open = !running && opencode_open(sid, &sessions);
+    // Steer, so the input shows in an open TUI at once. resume=false only admits it to the
+    // session's inbox, where it waits for the session's next turn without a run of its own.
+    let resume = running || open || headless;
+    let payload = json!({"text": text, "delivery": "steer", "resume": resume}).to_string();
     let path = format!("/api/session/{sid}/prompt");
     let got = run_json("opencode", &["api", "post", &path, "--data", &payload])?.ok_or("opencode is not on PATH")?;
     let msg = got.get("data").unwrap_or(&got);
-    Ok(format!(
-        "notified by steering into the session (delivery={} message={})",
-        msg["delivery"].as_str().unwrap_or("steer"),
-        msg["id"].as_str().unwrap_or("?")
-    ))
+    let id = msg["id"].as_str().unwrap_or("?");
+    Ok(if running {
+        format!("notified by steering into its running turn (message={id})")
+    } else if open {
+        format!("notified by steering into the session open in its TUI, which starts a turn (message={id})")
+    } else if headless {
+        format!("notified via headless resume in the OpenCode service (message={id})")
+    } else {
+        queued(
+            &format!("opencode:{sid} is neither running nor open in a TUI"),
+            &format!("from its OpenCode inbox (message={id}) with the session's next turn, when someone opens it and sends"),
+        )
+    })
 }
 
 fn logs_dir(home: &Store) -> Res<PathBuf> {
@@ -135,6 +215,28 @@ fn process_ancestors(pid: &str) -> BTreeSet<String> {
     seen
 }
 
+/// Every herdr agent of `kind` in every running herdr session, as (session, agent).
+fn herdr_agents(kind: &str) -> Vec<(String, Value)> {
+    let mut out = vec![];
+    if which("herdr").is_none() {
+        return out;
+    }
+    let sessions = herdr_json(&["session", "list", "--json"]);
+    for session in sessions["sessions"].as_array().into_iter().flatten() {
+        if session["running"].as_bool() != Some(true) {
+            continue;
+        }
+        let Some(name) = session["name"].as_str() else { continue };
+        let agents = herdr_json(&["--session", name, "agent", "list"]);
+        for agent in agents["result"]["agents"].as_array().into_iter().flatten() {
+            if agent["agent"].as_str() == Some(kind) {
+                out.push((name.to_string(), agent.clone()));
+            }
+        }
+    }
+    out
+}
+
 fn herdr_json(args: &[&str]) -> Value {
     match Command::new("herdr").args(args).stdin(Stdio::null()).output() {
         Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or(Value::Null),
@@ -147,37 +249,27 @@ fn herdr_json(args: &[&str]) -> Value {
 /// ancestors.
 fn herdr_pane(pids: &[String]) -> Option<(String, String)> {
     let ancestors: BTreeSet<String> = pids.iter().flat_map(|p| process_ancestors(p)).collect();
-    let sessions = herdr_json(&["session", "list", "--json"]);
-    for session in sessions["sessions"].as_array().into_iter().flatten() {
-        if session["running"].as_bool() != Some(true) {
-            continue;
-        }
-        let Some(name) = session["name"].as_str() else { continue };
-        let agents = herdr_json(&["--session", name, "agent", "list"]);
-        for agent in agents["result"]["agents"].as_array().into_iter().flatten() {
-            if agent["agent"].as_str() != Some("agy") {
-                continue;
-            }
-            let Some(pane) = agent["pane_id"].as_str() else { continue };
-            let info = herdr_json(&["--session", name, "pane", "process-info", "--pane", pane]);
-            let info = &info["result"]["process_info"];
-            let mut owned: BTreeSet<String> = info["foreground_processes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|p| p["pid"].to_string())
-                .collect();
-            owned.insert(info["shell_pid"].to_string());
-            if owned.iter().any(|p| ancestors.contains(p)) {
-                return Some((name.to_string(), pane.to_string()));
-            }
+    for (name, agent) in herdr_agents("agy") {
+        let Some(pane) = agent["pane_id"].as_str() else { continue };
+        let info = herdr_json(&["--session", &name, "pane", "process-info", "--pane", pane]);
+        let info = &info["result"]["process_info"];
+        let mut owned: BTreeSet<String> =
+            info["foreground_processes"].as_array().into_iter().flatten().map(|p| p["pid"].to_string()).collect();
+        owned.insert(info["shell_pid"].to_string());
+        if owned.iter().any(|p| ancestors.contains(p)) {
+            return Some((name, pane.to_string()));
         }
     }
     None
 }
 
 fn queue_dir(home_dir: &Path, cid: &str) -> Res<PathBuf> {
-    let q = home_dir.join("queue").join(format!("antigravity-{cid}"));
+    runtime_queue_dir(home_dir, "antigravity", cid)
+}
+
+/// The spool of one session's notifications that wait for a headless run.
+fn runtime_queue_dir(home_dir: &Path, runtime: &str, id: &str) -> Res<PathBuf> {
+    let q = home_dir.join("queue").join(format!("{runtime}-{id}"));
     fs::create_dir_all(&q).map_err(|e| format!("cannot create {}: {e}", q.display()))?;
     Ok(q)
 }
@@ -200,10 +292,15 @@ fn paste_into_tui(qdir: &Path, session: &str, pane: &str, text: &str) -> Res<()>
     Ok(())
 }
 
-fn notify_antigravity(cid: &str, home: &Store, text: &str) -> Res<String> {
+fn notify_antigravity(target: &Address, home: &Store, text: &str, meta: &Value, headless: bool) -> Res<String> {
+    let cid = target.id.as_str();
+    let address = target.to_string();
     let qdir = queue_dir(&home.dir, cid)?;
     match antigravity_tui(cid) {
         Tui::Herdr(session, pane) => {
+            // This notification counts every unread message, so earlier queued ones are stale.
+            let mut h = Store::open(&home.root)?;
+            let _ = h.take_notifications(&address);
             paste_into_tui(&qdir, &session, &pane, text).map_err(|e| {
                 format!(
                     "antigravity:{cid} is open in an agy TUI (herdr session {session} pane {pane}) but the \
@@ -215,7 +312,18 @@ fn notify_antigravity(cid: &str, home: &Store, text: &str) -> Res<String> {
             ));
         }
         Tui::Terminal(tty) => {
-            return Err(format!("antigravity:{cid} is open in an agy TUI on {tty}, outside herdr; the notification cannot reach it"));
+            home.push_notification(&address, text, meta)?;
+            return Ok(queued(
+                &format!("{target} is open in an agy TUI on {tty}, outside herdr, where peers cannot type"),
+                "when its TUI runs in herdr and the next message arrives; until then it shows in `peers chats`",
+            ));
+        }
+        Tui::None if !headless => {
+            home.push_notification(&address, text, meta)?;
+            return Ok(queued(
+                &format!("{target} is not open in an agy TUI"),
+                "when its TUI runs in herdr and the next message arrives; until then it shows in `peers chats`",
+            ));
         }
         Tui::None => {}
     }
@@ -283,6 +391,120 @@ pub fn drain_antigravity(cid: &str, home_dir: &Path) -> Res<()> {
             // Antigravity peers always skip permission prompts; -p takes the prompt, so it goes last.
             let _ = Command::new("agy")
                 .args(["--conversation", cid, "--dangerously-skip-permissions", "--output-format", "json", "-p", &text])
+                .stdin(Stdio::null())
+                .stdout(out)
+                .stderr(err)
+                .status();
+            let _ = fs::remove_file(&entry);
+        }
+        drop(lock);
+        if pending(&qdir).is_empty() {
+            return Ok(()); // a notification spooled while unlocking needs another pass
+        }
+    }
+}
+
+/// Spools `text` for a headless run of `runtime` on session `id`, and starts a drainer for it.
+fn spool(home: &Store, runtime: &str, id: &str, text: &str, drain_args: &[&std::ffi::OsStr]) -> Res<(u32, String)> {
+    let qdir = runtime_queue_dir(&home.dir, runtime, id)?;
+    let s = stamp();
+    let entry = qdir.join(format!("{s}.md"));
+    let tmp = qdir.join(format!("{s}.md.tmp"));
+    fs::write(&tmp, text).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &entry).map_err(|e| format!("cannot write {}: {e}", entry.display()))?;
+    let child = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+        .args(drain_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("cannot start the {runtime} drainer: {e}"))?;
+    Ok((child.id(), s))
+}
+
+/// A live pi session with the peers extension takes the notification from its queue as a turn;
+/// any other pi session finds it queued when it next starts with the extension, or, with
+/// `headless`, gets one headless run per notification, in order.
+fn notify_pi(target: &Address, home: &Store, text: &str, meta: &Value, headless: bool) -> Res<String> {
+    let address = target.to_string();
+    if home.listener_alive(&address)? {
+        home.push_notification(&address, text, meta)?;
+        return Ok("notified via the peers pi extension (it arrives in the session as a turn)".into());
+    }
+    if !headless {
+        home.push_notification(&address, text, meta)?;
+        return Ok(queued(
+            &format!("{target} has no peers extension listening"),
+            "as a turn when it next starts with the peers extension",
+        ));
+    }
+    if which("pi").is_none() {
+        return Err("pi is not on PATH".into());
+    }
+    if runtime::pi_session(&target.id).is_none() {
+        return Err(format!(
+            "no saved pi session {} in {}; a pi session is saved once it has run a turn",
+            target.id,
+            runtime::pi_sessions_dir().display()
+        ));
+    }
+    let (pid, s) = spool(
+        home,
+        "pi",
+        &target.id,
+        text,
+        &["_drain-pi".as_ref(), target.id.as_ref(), "--root".as_ref(), home.root.as_os_str()],
+    )?;
+    let log = home.dir.join("logs").join(format!("pi-{}-{s}.jsonl", target.id));
+    Ok(format!(
+        "notified via headless resume (no peers extension is listening in it; queued behind any run in progress) \
+         drainer={pid} log={}",
+        log.display()
+    ))
+}
+
+/// Runs the spooled notifications of one pi session, one headless pi run at a time. A notification
+/// whose session meanwhile started listening through the peers extension goes to its queue instead.
+pub fn drain_pi(id: &str, root: &Path) -> Res<()> {
+    let store = Store::open(root)?;
+    let address = Address::new("pi", id).to_string();
+    let qdir = runtime_queue_dir(&store.dir, "pi", id)?;
+    let logs = logs_dir(&store)?;
+    loop {
+        let Some(lock) = flock(&qdir.join(".lock"), true)? else {
+            return Ok(()); // the drainer holding the lock takes this one next
+        };
+        while let Some(entry) = pending(&qdir).into_iter().next() {
+            let text = fs::read_to_string(&entry).map_err(|e| e.to_string())?;
+            if store.listener_alive(&address)? {
+                store.push_notification(&address, &text, &json!({}))?;
+                let _ = fs::remove_file(&entry);
+                continue;
+            }
+            let s = entry.file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+            let log = logs.join(format!("pi-{id}-{s}.jsonl"));
+            let _ = fs::write(logs.join(format!("pi-{id}-{s}.prompt.md")), &text);
+            let out = File::create(&log).map_err(|e| e.to_string())?;
+            let err = out.try_clone().map_err(|e| e.to_string())?;
+            let mut cmd = Command::new("pi");
+            match runtime::pi_session(id) {
+                Some(sess) => {
+                    cmd.arg("--session").arg(&sess.file);
+                    if Path::new(&sess.cwd).is_dir() {
+                        cmd.current_dir(&sess.cwd);
+                    }
+                }
+                None => {
+                    cmd.arg("--session").arg(id);
+                }
+            }
+            // The prompt goes after `--`, so no option parsing can take it. PEERS_PI_HEADLESS keeps
+            // the peers extension from listening inside this one-shot run.
+            let _ = cmd
+                .args(["--mode", "json", "--"])
+                .arg(text.trim_end())
+                .env("PEERS_PI_HEADLESS", "1")
                 .stdin(Stdio::null())
                 .stdout(out)
                 .stderr(err)

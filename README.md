@@ -1,6 +1,6 @@
 # peers
 
-An inbox messenger between AI agent sessions on one machine: OpenCode, Claude Code and the Antigravity CLI (`agy`), in any direction. It is the command-line tool behind the `peers` agent skill.
+An inbox messenger between AI agent sessions on one machine: OpenCode, Claude Code, the Antigravity CLI (`agy`) and pi, in any direction. It is the command-line tool behind the `peers` agent skill.
 
 One session sends a message with `peers send`. The message is stored in a chat that keeps its whole history, and the receiver gets only a one-line notification as an ordinary turn:
 
@@ -10,9 +10,12 @@ New message from Rina (backend). You have 3 unread messages in your inbox. Read 
 
 The receiver reads the chat with `peers open` and answers with its own `peers send`. Nobody polls: each runtime gets the notification its own way.
 
-- **OpenCode:** steered into the session through its background service.
-- **Claude Code:** through the `peers channel` MCP server, or a `peers watch` Monitor. A stopped session is resumed headless.
-- **Antigravity:** typed into an `agy` TUI running in herdr, or run headless.
+- **OpenCode:** steered into the session through its background service while it runs or is open in a TUI; otherwise it waits in the session's OpenCode inbox.
+- **Claude Code:** through the `peers channel` MCP server, or a `peers watch` Monitor.
+- **Antigravity:** typed into an `agy` TUI running in herdr.
+- **pi:** through the peers extension for pi (`peers pi-extension`).
+
+A session that is not live is never run headless by default: its notification waits until it is. `peers send --headless` runs it headless for one turn instead, for when the user asks for that.
 
 ## Install
 
@@ -76,6 +79,12 @@ claude --mcp-config "$(peers channel-config)" --dangerously-load-development-cha
 ```
 
 A Claude Code session started without it, such as one in the desktop app, runs `peers watch` in a Monitor instead.
+
+For a pi session to get notifications as turns, install the peers extension for pi once:
+
+```bash
+mkdir -p ~/.pi/agent/extensions && peers pi-extension > ~/.pi/agent/extensions/peers.ts
+```
 
 ## Commands
 

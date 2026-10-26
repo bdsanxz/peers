@@ -125,6 +125,91 @@ pub fn antigravity_sessions() -> Vec<AgySession> {
     vec![]
 }
 
+/// Where pi saves its sessions: $PI_CODING_AGENT_SESSION_DIR, else $PI_CODING_AGENT_DIR/sessions,
+/// else ~/.pi/agent/sessions. Each session is one JSONL file, by default in a folder per directory.
+pub fn pi_sessions_dir() -> PathBuf {
+    if let Some(d) = env_nonempty("PI_CODING_AGENT_SESSION_DIR") {
+        return PathBuf::from(d);
+    }
+    env_nonempty("PI_CODING_AGENT_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".pi/agent")).join("sessions")
+}
+
+pub struct PiSession {
+    pub id: String,
+    pub file: PathBuf,
+    pub cwd: String,
+    pub name: String,
+    /// Last change of the session file, in milliseconds.
+    pub modified: i64,
+}
+
+/// The session files under the sessions directory: its own files and those one folder down.
+fn pi_files() -> Vec<PathBuf> {
+    let mut out = vec![];
+    let Ok(rd) = fs::read_dir(pi_sessions_dir()) else { return out };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if let Ok(inner) = fs::read_dir(&p) {
+                out.extend(inner.flatten().map(|e| e.path()).filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl")));
+            }
+        } else if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Reads a session file's header, and its latest name when `with_name`.
+fn pi_read(file: &Path, with_name: bool) -> Option<PiSession> {
+    let f = File::open(file).ok()?;
+    let mut lines = BufReader::new(f).lines().map_while(Result::ok);
+    let head: Value = serde_json::from_str(&lines.next()?).ok()?;
+    if head["type"].as_str() != Some("session") {
+        return None;
+    }
+    let mut name = String::new();
+    if with_name {
+        for line in lines {
+            if line.contains("\"session_info\"") {
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    if let Some(n) = v["name"].as_str() {
+                        name = n.to_string();
+                    }
+                }
+            }
+        }
+    }
+    let modified = fs::metadata(file)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Some(PiSession {
+        id: head["id"].as_str()?.to_string(),
+        file: file.to_path_buf(),
+        cwd: head["cwd"].as_str().unwrap_or("").to_string(),
+        name,
+        modified,
+    })
+}
+
+/// Every saved pi session, oldest change first.
+pub fn pi_sessions() -> Vec<PiSession> {
+    let mut v: Vec<PiSession> = pi_files().iter().filter_map(|f| pi_read(f, true)).collect();
+    v.sort_by_key(|s| s.modified);
+    v
+}
+
+/// One pi session by id. Its file is named <timestamp>_<id>.jsonl; the header confirms it.
+pub fn pi_session(id: &str) -> Option<PiSession> {
+    let suffix = format!("_{id}.jsonl");
+    let files = pi_files();
+    let named = files.iter().filter(|f| f.to_string_lossy().ends_with(&suffix));
+    named.chain(files.iter()).filter_map(|f| pi_read(f, false)).find(|s| s.id == id)
+}
+
 pub fn claude_transcript(sid: &str) -> Option<PathBuf> {
     let projects = home().join(".claude/projects");
     fs::read_dir(projects).ok()?.flatten().map(|e| e.path().join(format!("{sid}.jsonl"))).find(|p| p.is_file())
@@ -171,6 +256,7 @@ fn claude_cwd(sid: &str) -> Option<String> {
 pub fn session_cwd(addr: &Address) -> Option<PathBuf> {
     let dir = match addr.runtime.as_str() {
         "claude" => claude_cwd(&addr.id),
+        "pi" => pi_session(&addr.id).map(|s| s.cwd).filter(|c| !c.is_empty()),
         "opencode" => opencode_sessions()
             .ok()?
             .into_iter()
@@ -192,6 +278,7 @@ fn content_text(content: &Value) -> String {
 }
 
 /// The last turns of a session, as (role, text); Antigravity gives its summary instead.
+/// A pi session gives the turns of its file in the order they were written, every branch included.
 pub fn show(addr: &Address, last: usize) -> Res<Vec<String>> {
     let mut turns: Vec<(String, String)> = vec![];
     match addr.runtime.as_str() {
@@ -207,6 +294,24 @@ pub fn show(addr: &Address, last: usize) -> Res<Vec<String>> {
                 format!("modified: {}", s.modified),
                 format!("preview: {}", s.preview.chars().take(1200).collect::<String>()),
             ]);
+        }
+        "pi" => {
+            let s = pi_session(&addr.id)
+                .ok_or_else(|| format!("no pi session {} in {}", addr.id, pi_sessions_dir().display()))?;
+            let f = File::open(&s.file).map_err(|e| format!("cannot read {}: {e}", s.file.display()))?;
+            for line in BufReader::new(f).lines().map_while(Result::ok) {
+                let Ok(d) = serde_json::from_str::<Value>(&line) else { continue };
+                if d["type"].as_str() != Some("message") {
+                    continue;
+                }
+                let role = d["message"]["role"].as_str().unwrap_or("");
+                if role == "user" || role == "assistant" {
+                    let txt = content_text(&d["message"]["content"]);
+                    if !txt.trim().is_empty() {
+                        turns.push((role.to_string(), txt));
+                    }
+                }
+            }
         }
         "opencode" => {
             let path = format!("/api/session/{}/message", addr.id);

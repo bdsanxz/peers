@@ -16,6 +16,7 @@ const B: &str = "claude:11111111-1111-1111-1111-111111111111";
 const C: &str = "claude:cccccccc-cccc-cccc-cccc-cccccccccccc";
 const STOPPED: &str = "claude:99999999-9999-9999-9999-999999999999";
 const AGY: &str = "antigravity:33333333-3333-3333-3333-333333333333";
+const PI: &str = "pi:01a176bc-0000-7000-8000-000000000001";
 
 struct Env {
     tmp: PathBuf,
@@ -72,7 +73,35 @@ esac"#,
 echo start >>"$HOME/agy-timeline"; sleep 0.3; echo end >>"$HOME/agy-timeline"
 echo '{"conversation_id":"33333333-3333-3333-3333-333333333333","status":"SUCCESS","response":"ok"}'"#,
         );
+        // `pi --session <file> --mode json -- <prompt>` records its arguments and working directory.
+        stub(
+            &bin,
+            "pi",
+            r#"printf '%s\n' "$@" >"$HOME/pi-args"; pwd >"$HOME/pi-cwd"; env | grep '^PEERS_PI_HEADLESS=' >"$HOME/pi-env"
+echo start >>"$HOME/pi-timeline"; sleep 0.3; echo end >>"$HOME/pi-timeline"
+echo '{"type":"agent_end"}'"#,
+        );
         Env { tmp }
+    }
+
+    /// Saves a pi session file for PI, working in `cwd`, as pi lays them out.
+    fn save_pi_session(&self, cwd: &Path) -> PathBuf {
+        let id = PI.trim_start_matches("pi:");
+        let dir = self.home().join(".pi/agent/sessions/--work--");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("2026-10-26T05-43-49-434Z_{id}.jsonl"));
+        fs::write(
+            &file,
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2026-10-26T05:43:49.434Z\",\"cwd\":\"{}\"}}\n\
+                 {{\"type\":\"message\",\"id\":\"a1\",\"parentId\":null,\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"hello pi\"}}]}}}}\n\
+                 {{\"type\":\"message\",\"id\":\"a2\",\"parentId\":\"a1\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"thinking\",\"thinking\":\"hmm\"}},{{\"type\":\"text\",\"text\":\"hi there\"}}]}}}}\n\
+                 {{\"type\":\"session_info\",\"id\":\"a3\",\"parentId\":\"a2\",\"name\":\"debater\"}}\n",
+                cwd.display()
+            ),
+        )
+        .unwrap();
+        file
     }
 
     fn home(&self) -> PathBuf {
@@ -437,12 +466,51 @@ fn opencode_target_is_steered_the_notification() {
     )
     .unwrap();
     let sent = e.ok(A, &d, &["send", "opencode:ses_abc", "--kind", "request", "--seq", "1", "--body", "secret body"]);
-    has(&sent, "notified by steering into the session (delivery=steer message=msg_1)");
+    // Neither running nor open in a TUI: admitted to its inbox, no run.
+    has(&sent, "queued, not delivered yet: opencode:ses_abc is neither running nor open in a TUI");
+    has(&sent, "No headless run was started");
     let prompt = fs::read_to_string(e.home().join("opencode-prompt")).unwrap();
     has(&prompt, r#""delivery":"steer""#);
+    has(&prompt, r#""resume":false"#);
     has(&prompt, &format!("New message from {A} (unassigned). You have 1 unread message in your inbox. Read it with: peers open {A}\""));
     lacks(&prompt, "secret body");
     has(&e.ok("opencode:ses_abc", &d, &["open", A]), "secret body");
+    // --headless resumes it in the service.
+    let sent = e.ok(A, &d, &["send", "opencode:ses_abc", "--kind", "notice", "--seq", "2", "--body", "x", "--headless"]);
+    has(&sent, "notified via headless resume in the OpenCode service (message=msg_1)");
+    has(&fs::read_to_string(e.home().join("opencode-prompt")).unwrap(), r#""resume":true"#);
+    // A session open in a TUI (a process opened with its id) is steered with a turn.
+    stub(&e.tmp.join("bin"), "ps", r#"[ "$*" = "-ax -o args=" ] && { echo "/opt/homebrew/bin/opencode -s ses_abc"; exit 0; }
+exec /bin/ps "$@""#);
+    let sent = e.ok(A, &d, &["send", "opencode:ses_abc", "--kind", "notice", "--seq", "3", "--body", "y"]);
+    has(&sent, "notified by steering into the session open in its TUI");
+    has(&fs::read_to_string(e.home().join("opencode-prompt")).unwrap(), r#""resume":true"#);
+    // A TUI in herdr without the id in its arguments: found by its directory, for the newest session there.
+    stub(&e.tmp.join("bin"), "ps", r#"[ "$*" = "-ax -o args=" ] && { echo "opencode --prompt hi"; exit 0; }
+exec /bin/ps "$@""#);
+    stub(
+        &e.tmp.join("bin"),
+        "herdr",
+        &format!(
+            r#"case "$*" in
+  "session list --json") echo '{{"sessions":[{{"name":"main","running":true}}]}}' ;;
+  "--session main agent list") echo '{{"result":{{"agents":[{{"agent":"opencode","pane_id":"w1:p2","terminal_title":"OpenCode","cwd":"{}"}}]}}}}' ;;
+  *) echo "unexpected herdr call: $*" >&2; exit 9 ;;
+esac"#,
+            d.display()
+        ),
+    );
+    let sessions = |newest: &str| {
+        format!(
+            r#"{{"data":[{{"id":"ses_abc","time":{{"updated":{}}},"location":{{"directory":"{d}"}}}},{{"id":"ses_old","time":{{"updated":5}},"location":{{"directory":"{d}"}}}}]}}"#,
+            if newest == "ses_abc" { 9 } else { 1 },
+            d = d.display()
+        )
+    };
+    fs::write(e.home().join("opencode-sessions.json"), sessions("ses_abc")).unwrap();
+    has(&e.send(A, &d, "opencode:ses_abc", "4", "z"), "notified by steering into the session open in its TUI");
+    fs::write(e.home().join("opencode-sessions.json"), sessions("ses_old")).unwrap();
+    has(&e.send(A, &d, "opencode:ses_abc", "5", "z"), "queued, not delivered yet");
 }
 
 #[test]
@@ -462,7 +530,7 @@ fn reply_hints_tell_the_sender_to_end_its_turn() {
         let args = [&["send", "opencode:ses_abc", "--seq", "1", "--body", "hi"][..], extra].concat();
         e.ok(me, &d, &args)
     };
-    has(&send("opencode:ses_me", &["--kind", "request"]), "arrives in this session as a new user turn");
+    has(&send("opencode:ses_me", &["--kind", "request"]), "steered into this session as a new user turn");
     has(&send("antigravity:66666666-6666-6666-6666-666666666666", &["--kind", "request"]), "Do not sleep, poll");
     has(&send(A, &["--kind", "request"]), "Arm one Monitor watch on `peers watch`");
     has(&send(A, &["--kind", "request", "--reply-to", "opencode:ses_boss"]), "goes to opencode:ses_boss, not to you");
@@ -475,7 +543,12 @@ fn stopped_claude_target_is_resumed_headless_with_the_notification() {
     let d = e.dir("w");
     e.set_claude_live(&[]);
     e.ok(STOPPED, &d, &["whoami"]);
-    let sent = e.send(A, &d, STOPPED, "1", "wake up");
+    let queued = e.send(A, &d, STOPPED, "1", "wake up");
+    has(&queued, &format!("queued, not delivered yet: {STOPPED} is not running"));
+    assert!(!e.home().join("claude-args").exists(), "a stopped claude ran without --headless");
+    // The queued notification reaches it when it next starts with a watch.
+    has(&e.watch_line(STOPPED, &d), "You have 1 unread message");
+    let sent = e.ok(A, &d, &["send", STOPPED, "--kind", "notice", "--seq", "1", "--body", "wake up", "--headless"]);
     has(&sent, "notified via headless resume pid=");
     wait_for("the headless claude run", 10, || e.home().join("claude-stdin").is_file() && e.home().join("claude-args").is_file());
     let args = fs::read_to_string(e.home().join("claude-args")).unwrap();
@@ -489,8 +562,11 @@ fn stopped_claude_target_is_resumed_headless_with_the_notification() {
 fn antigravity_headless_runs_one_at_a_time_in_order() {
     let e = Env::new("agy");
     let d = e.dir("w");
-    let sent = e.ok(A, &d, &["send", AGY, "--kind", "request", "--seq", "4", "--reply-to", "opencode:ses_boss", "--body", "relay me"]);
-    has(&sent, &format!("SENT {AGY}: stored in its inbox (1 unread message); notified via headless resume (queued"));
+    let queued = e.ok(A, &d, &["send", AGY, "--kind", "notice", "--seq", "3", "--body", "not yet"]);
+    has(&queued, &format!("queued, not delivered yet: {AGY} is not open in an agy TUI"));
+    assert!(!e.home().join("agy-args").exists(), "agy ran without --headless");
+    let sent = e.ok(A, &d, &["send", AGY, "--kind", "request", "--seq", "4", "--reply-to", "opencode:ses_boss", "--body", "relay me", "--headless"]);
+    has(&sent, &format!("SENT {AGY}: stored in its inbox (2 unread messages); notified via headless resume (queued"));
     // The chat names where the answer goes.
     has(&e.ok(A, &d, &["open", AGY]), "  request seq 4 · answer goes to opencode:ses_boss · not read yet\n  relay me\n");
     wait_for("the first agy run", 20, || fs::read_to_string(e.home().join("agy-timeline")).unwrap_or_default().contains("end"));
@@ -499,7 +575,7 @@ fn antigravity_headless_runs_one_at_a_time_in_order() {
     has(&args, "-p\nNew message from");
     fs::remove_file(e.home().join("agy-timeline")).unwrap();
     for n in 5..=7 {
-        e.send(A, &d, AGY, &n.to_string(), &format!("n{n}"));
+        e.ok(A, &d, &["send", AGY, "--kind", "notice", "--seq", &n.to_string(), "--body", &format!("n{n}"), "--headless"]);
     }
     wait_for("three agy runs", 30, || {
         fs::read_to_string(e.home().join("agy-timeline")).unwrap_or_default().matches("end").count() == 3
@@ -542,10 +618,13 @@ esac"#,
     let blocked = e.run(A, &d, &["send", t, "--kind", "notice", "--seq", "12", "--body", "x"]);
     has(&blocked.err, "the message is stored");
     has(&blocked.err, "agent_blocked");
-    // A TUI outside herdr is refused before anything is stored.
+    // A TUI outside herdr: queued by default; --headless is refused before anything is stored.
     stub(&bin, "herdr", r#"[ "$*" = "session list --json" ] && { echo '{"sessions":[]}'; exit 0; }
 echo "unexpected herdr call: $*" >&2; exit 9"#);
-    let refused = e.run(A, &d, &["send", t, "--kind", "notice", "--seq", "9", "--body", "never stored"]);
+    let queued = e.send(A, &d, t, "8", "waits");
+    has(&queued, "outside herdr, where peers cannot type");
+    has(&queued, "queued, not delivered yet");
+    let refused = e.run(A, &d, &["send", t, "--kind", "notice", "--seq", "9", "--body", "never stored", "--headless"]);
     has(&refused.err, "outside herdr");
     lacks(&e.ok(A, &d, &["open", t]), "never stored");
 }
@@ -643,4 +722,100 @@ fn channel_pushes_notifications_as_channel_turns() {
     // Once the channel has exited, the session no longer counts as listening.
     e.set_claude_live(&[(me, &d)]);
     has(&e.send("opencode:ses_sender", &d, me, "8", "pong"), "via notification queue");
+}
+
+// ---------------------------------------------------------------------------
+// pi
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pi_session_is_found_listed_and_shown() {
+    let e = Env::new("pi-show");
+    let d = e.dir("w");
+    e.save_pi_session(&d);
+    let id = PI.trim_start_matches("pi:");
+    let who = e.run_env(None, &d, &[("PI_SESSION_ID", id)], &["whoami"], None);
+    assert_eq!(who.out.trim(), PI, "{}", who.all());
+    let list = e.ok(A, &d, &["list"]);
+    has(&list, &format!("{PI}  kind=session  status=saved  name=\"debater\""));
+    let shown = e.ok(A, &d, &["show", PI]);
+    has(&shown, "user: hello pi\nassistant: hi there\n");
+    // The session's directory decides its squad, so a sender elsewhere names its own squad.
+    let other = e.dir("elsewhere");
+    let sent = e.ok(A, &other, &["send", PI, "--kind", "notice", "--seq", "1", "--body", "hi", "--headless"]);
+    has(&sent, "notified via headless resume");
+    wait_for("the headless pi run", 20, || e.home().join("pi-args").is_file());
+}
+
+#[test]
+fn pi_without_a_listener_runs_headless_one_at_a_time_in_order() {
+    let e = Env::new("pi-headless");
+    let d = e.dir("w");
+    let file = e.save_pi_session(&d);
+    let queued = e.ok(A, &d, &["send", PI, "--kind", "notice", "--seq", "0", "--body", "not yet"]);
+    has(&queued, &format!("queued, not delivered yet: {PI} has no peers extension listening"));
+    let sent = e.ok(A, &d, &["send", PI, "--kind", "request", "--seq", "1", "--body", "debate me", "--headless"]);
+    has(&sent, &format!("SENT {PI}: stored in its inbox (2 unread messages); notified via headless resume (no peers extension"));
+    wait_for("the first pi run", 20, || fs::read_to_string(e.home().join("pi-timeline")).unwrap_or_default().contains("end"));
+    let args = fs::read_to_string(e.home().join("pi-args")).unwrap();
+    has(&args, &format!("--session\n{}\n--mode\njson\n--\nNew message from", file.display()));
+    lacks(&args, "debate me");
+    assert_eq!(fs::read_to_string(e.home().join("pi-cwd")).unwrap().trim(), d.display().to_string());
+    has(&fs::read_to_string(e.home().join("pi-env")).unwrap(), "PEERS_PI_HEADLESS=1");
+    fs::remove_file(e.home().join("pi-timeline")).unwrap();
+    for n in 2..=4 {
+        e.ok(A, &d, &["send", PI, "--kind", "notice", "--seq", &n.to_string(), "--body", &format!("n{n}"), "--headless"]);
+    }
+    wait_for("three pi runs", 30, || fs::read_to_string(e.home().join("pi-timeline")).unwrap_or_default().matches("end").count() == 3);
+    let timeline = fs::read_to_string(e.home().join("pi-timeline")).unwrap();
+    assert_eq!(timeline.lines().collect::<Vec<_>>(), ["start", "end", "start", "end", "start", "end"], "runs overlapped:\n{timeline}");
+}
+
+#[test]
+fn pi_listener_gets_notifications_and_releases_on_stdin_close() {
+    let e = Env::new("pi-listen");
+    let d = e.dir("w");
+    e.save_pi_session(&d);
+    let mut child = e
+        .command(None, &d, &[], &["_pi-listen", PI, "--cwd", &d.display().to_string()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for("the listener to register", 10, || e.ok(A, &d, &["list"]).contains("status=listening"));
+    let sent = e.ok(A, &d, &["send", PI, "--kind", "request", "--seq", "1", "--body", "debate me"]);
+    has(&sent, "notified via the peers pi extension");
+    let lines = read_lines(&mut child, 1, Duration::from_secs(10));
+    has(&lines.join(""), &format!("Read it with: peers open {A}"));
+    // The pi session's own reply hint names the extension.
+    let reply = e.ok(PI, &d, &["send", A, "--kind", "completion", "--seq", "1", "--body", "done"]);
+    has(&reply, "through the peers extension");
+    drop(child.stdin.take());
+    let status = child.wait().unwrap();
+    assert!(status.success());
+    // Released: the next notification waits for the next listener, and it gets it on start.
+    has(&e.ok(A, &d, &["send", PI, "--kind", "notice", "--seq", "2", "--body", "x"]), "queued, not delivered yet");
+    let mut again = e
+        .command(None, &d, &[], &["_pi-listen", PI, "--cwd", &d.display().to_string()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    has(&read_lines(&mut again, 1, Duration::from_secs(10)).join(""), "Read it with");
+    drop(again.stdin.take());
+    let _ = again.wait();
+}
+
+#[test]
+fn pi_extension_is_printed_and_rejects_other_runtimes() {
+    let e = Env::new("pi-ext");
+    let d = e.dir("w");
+    let ext = e.ok(A, &d, &["pi-extension"]);
+    has(&ext, "_pi-listen");
+    has(&ext, "deliverAs: \"steer\"");
+    let o = e.run(A, &d, &["_pi-listen", A]);
+    assert_eq!(o.code, 2);
+    has(&o.all(), "serves pi sessions only");
 }

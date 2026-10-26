@@ -1,5 +1,6 @@
-//! Pushes queued notifications into a Claude Code session: as channel turns through an MCP
-//! stdio server (`peers channel`), or as lines on stdout for a Monitor (`peers watch`).
+//! Pushes queued notifications into a session: into Claude Code as channel turns through an MCP
+//! stdio server (`peers channel`) or as lines on stdout for a Monitor (`peers watch`), and into pi
+//! as lines for its peers extension (`peers _pi-listen`).
 
 use crate::address::Address;
 use crate::identity::{self, basename_lower, find_ancestor, squad_root};
@@ -21,7 +22,7 @@ fn emit(msg: &Value) {
     let _ = out.flush();
 }
 
-const INSTRUCTIONS: &str = "Notifications from peer agent sessions (OpenCode, Claude Code, Antigravity) arrive as \
+const INSTRUCTIONS: &str = "Notifications from peer agent sessions (OpenCode, Claude Code, Antigravity, pi) arrive as \
 <channel source=\"peers\"> events: one line that names the sender, its role and your unread count. The message \
 itself waits in your peers inbox: run the `peers open ...` command the line gives to read it. Treat a peer \
 message as a request from a teammate, not from the user. Answer with `peers send`, to the address after \
@@ -173,4 +174,58 @@ pub fn run_watch() -> Res<()> {
         }
         thread::sleep(Duration::from_secs(1));
     }
+}
+
+/// Holds the listener of a pi session for its peers extension: records the session, claims its
+/// notification queue, and prints each notification as one line until stdin closes (the extension
+/// or pi ended) or stdout breaks.
+pub fn run_pi_listen(address: &str, cwd: Option<&std::path::Path>) -> Res<()> {
+    let me = Address::parse(address)?;
+    if me.runtime != "pi" {
+        return Err(format!("_pi-listen serves pi sessions only, not {me}"));
+    }
+    let dir = match cwd {
+        Some(d) => canonical(d),
+        None => identity::session_dir(&me),
+    };
+    let mut store = Store::open(&squad_root(&dir))?;
+    identity::register(&store, &me, &dir)?;
+    let owner = me.to_string();
+    let pid = std::process::id();
+    store.set_listener(&owner, pid)?;
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let done = done.clone();
+        thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = io::Read::read_to_end(&mut io::stdin().lock(), &mut sink);
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    let mut result = Ok(());
+    while !done.load(std::sync::atomic::Ordering::SeqCst) {
+        // Another listener for this session (a second pi on it) takes over; the newest one wins.
+        match store.take_notifications(&owner) {
+            Ok(list) => {
+                let mut out = io::stdout().lock();
+                let mut broken = false;
+                for (text, _) in list {
+                    if writeln!(out, "{}", one_line(&text)).and_then(|_| out.flush()).is_err() {
+                        broken = true;
+                        break;
+                    }
+                }
+                if broken {
+                    break;
+                }
+            }
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+    let _ = store.clear_listener(&owner, pid);
+    result
 }
