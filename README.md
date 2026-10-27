@@ -80,7 +80,13 @@ claude --mcp-config "$(peers channel-config)" --dangerously-load-development-cha
 
 A Claude Code session started without it, such as one in the desktop app, runs `peers watch` in a Monitor instead.
 
-For a pi session to get notifications as turns, install the peers extension for pi once:
+A pi session gets notifications as turns through the peers extension for pi, which is built into `peers`. Load it for one run, installing nothing:
+
+```bash
+pi -e "$(peers pi-extension --path)"
+```
+
+Or install it for every pi session, and install it again after you update `peers`:
 
 ```bash
 mkdir -p ~/.pi/agent/extensions && peers pi-extension > ~/.pi/agent/extensions/peers.ts
@@ -100,6 +106,7 @@ mkdir -p ~/.pi/agent/extensions && peers pi-extension > ~/.pi/agent/extensions/p
 | `peers watch` | Streams your notifications, one line each, for a Claude Code Monitor. |
 | `peers channel` / `peers channel-config` | The MCP channel server that pushes notifications into a Claude Code session as turns, and the `--mcp-config` JSON that loads it. |
 | `peers show <address> [--last N]` | Prints the last turns of a session's own transcript. |
+| `peers pi-extension [--path]` | Prints the peers extension for pi, or writes it to the cache and prints its path. |
 
 Every command has `--help` with its details, output and exit codes. Exit code 2 means a usage error or a failed command, and the error line says why. Every command also takes `--squad <dir>` to use that squad's database.
 
@@ -136,6 +143,12 @@ cargo clippy --all-targets
 ```
 
 The tests in `tests/cli.rs` run the binary against stubs of the `claude`, `opencode`, `agy` and `herdr` CLIs. Each test gets its own temporary home and cache.
+
+The peers extension for pi, `src/pi_extension.ts`, has its own type check and tests in `pi-extension/`, which need [Bun](https://bun.sh):
+
+```bash
+cd pi-extension && bun install && bun run typecheck && bun test
+```
 
 ### Releasing
 

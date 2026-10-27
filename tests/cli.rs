@@ -815,6 +815,15 @@ fn pi_extension_is_printed_and_rejects_other_runtimes() {
     let ext = e.ok(A, &d, &["pi-extension"]);
     has(&ext, "_pi-listen");
     has(&ext, "deliverAs: \"steer\"");
+    // --path writes the same extension to the cache, once, and prints where.
+    let path = e.ok(A, &d, &["pi-extension", "--path"]);
+    let file = std::path::PathBuf::from(path.trim());
+    assert!(file.starts_with(e.tmp.join("cache")), "{}", file.display());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), ext);
+    let written = std::fs::metadata(&file).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(e.ok(A, &d, &["pi-extension", "--path"]), path);
+    assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), written);
     let o = e.run(A, &d, &["_pi-listen", A]);
     assert_eq!(o.code, 2);
     has(&o.all(), "serves pi sessions only");

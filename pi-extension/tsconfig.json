@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext"],
+    "types": ["bun"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "paths": { "@earendil-works/pi-coding-agent": ["./node_modules/@earendil-works/pi-coding-agent"] }
+  },
+  "include": ["../src/pi_extension.ts", "test"]
+}

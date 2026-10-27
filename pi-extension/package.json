@@ -1,0 +1,14 @@
+{
+  "name": "peers-pi-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@types/bun": "1.3.0",
+    "typescript": "5.9.3"
+  }
+}

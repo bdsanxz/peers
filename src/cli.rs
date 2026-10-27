@@ -295,16 +295,24 @@ Examples:
 
     /// Print the pi extension that delivers notifications into pi sessions
     #[command(after_help = r#"Output:
-  the TypeScript source of the peers extension for pi
+  the TypeScript source of the peers extension for pi; with --path, the absolute path of a file
+  that holds it
 
 Notes:
-  - Install it once; every interactive pi session then gets its notifications as turns.
-  - It runs `peers _pi-listen` for its session; a pi session without it gets headless runs instead.
+  - A pi session gets its notifications as turns only while this extension runs in it.
+  - The extension runs `peers _pi-listen` for its session, so it must come from the same peers
+    as the one on PATH: load it with --path, or install it again after updating peers.
+  - --path writes the extension to <cache root>/pi-extension/peers.ts, rewriting it only when it
+    differs, so the file always matches this binary.
 
 Examples:
-  mkdir -p ~/.pi/agent/extensions && peers pi-extension > ~/.pi/agent/extensions/peers.ts
-  pi -e /tmp/peers.ts             (one run only, after: peers pi-extension > /tmp/peers.ts)"#)]
-    PiExtension,
+  pi -e "$(peers pi-extension --path)"     (this run only; installs nothing)
+  mkdir -p ~/.pi/agent/extensions && peers pi-extension > ~/.pi/agent/extensions/peers.ts"#)]
+    PiExtension {
+        /// Write the extension to the peers cache and print the file's path instead.
+        #[arg(long)]
+        path: bool,
+    },
 
     /// Print the last turns of a session's own transcript
     #[command(after_help = r#"Output, OpenCode, Claude and pi:
@@ -410,8 +418,12 @@ pub fn run(cli: Cli) -> Res<()> {
             Ok(())
         }
         Cmd::DrainAntigravity { cid, dir } => deliver::drain_antigravity(&cid, &dir),
-        Cmd::PiExtension => {
-            print!("{}", include_str!("pi_extension.ts"));
+        Cmd::PiExtension { path } => {
+            if path {
+                println!("{}", pi_extension_file()?.display());
+            } else {
+                print!("{PI_EXTENSION}");
+            }
             Ok(())
         }
         Cmd::PiListen { address, cwd } => channel::run_pi_listen(&address, cwd.as_deref()),
@@ -895,4 +907,21 @@ fn cmd_delete(target: &str, squad: Option<&Path>) -> Res<()> {
         );
     }
     Ok(())
+}
+
+/// The peers extension for pi, built into the binary so that it always matches `_pi-listen`.
+const PI_EXTENSION: &str = include_str!("pi_extension.ts");
+
+/// Writes the extension to `<cache root>/pi-extension/peers.ts` when the file is missing or
+/// differs, and returns its path.
+fn pi_extension_file() -> Res<PathBuf> {
+    let file = crate::store::cache_root().join("pi-extension").join("peers.ts");
+    if std::fs::read_to_string(&file).ok().as_deref() != Some(PI_EXTENSION) {
+        let dir = file.parent().expect("the file has a directory");
+        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        let tmp = dir.join(format!(".peers.ts.{}", std::process::id()));
+        std::fs::write(&tmp, PI_EXTENSION).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &file).map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+    }
+    Ok(file)
 }

@@ -1,8 +1,9 @@
 /**
  * peers: delivers peer notifications into this pi session as user turns.
  *
- * Load it for one run with `pi -e <path to this file>`, or install it once for every pi session
- * by copying it to ~/.pi/agent/extensions/. `peers pi-extension` prints the same extension.
+ * The peers binary embeds this file: `peers pi-extension` prints it, and `pi -e "$(peers
+ * pi-extension --path)"` loads it for one run. Install it for every pi session with
+ * `peers pi-extension > ~/.pi/agent/extensions/peers.ts`.
  *
  * In an interactive (or RPC) session it runs `peers _pi-listen pi:<session id>`, which claims the
  * session's notification queue in its squad database and prints one line per notification. Each
