@@ -255,6 +255,130 @@ pub fn pi_session(id: &str) -> Option<PiSession> {
         .find(|s| s.id == id)
 }
 
+/// Where Muse Code keeps its data: $XDG_DATA_HOME/muse, else ~/.local/share/muse.
+pub fn muse_home() -> PathBuf {
+    env_nonempty("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".local/share"))
+        .join("muse")
+}
+
+pub struct MuseSession {
+    pub id: String,
+    pub title: String,
+    /// The workspace the session works in (`workspace_root`, not the log directory).
+    pub dir: String,
+    pub log: PathBuf,
+}
+
+/// Every Muse Code session in its session index, newest first.
+pub fn muse_sessions() -> Vec<MuseSession> {
+    let db = muse_home().join("session-index.db");
+    if !db.exists() {
+        return vec![];
+    }
+    let uri = format!("file:{}?mode=ro", db.display());
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = match Connection::open_with_flags(&uri, flags) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "peers: warning: cannot read Muse Code sessions from {}: {e}",
+                db.display()
+            );
+            return vec![];
+        }
+    };
+    let _ = conn.busy_timeout(Duration::from_secs(5));
+    let mut stmt = match conn.prepare(
+        "select session_id, title, workspace_root, session_log_path from sessions order by updated_at_us desc",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "peers: warning: cannot read Muse Code sessions from {}: {e}",
+                db.display()
+            );
+            return vec![];
+        }
+    };
+    stmt.query_map([], |r| {
+        let text = |i: usize| r.get_ref(i).map(text_of).unwrap_or_default();
+        Ok(MuseSession {
+            id: text(0),
+            title: text(1),
+            dir: text(2),
+            log: PathBuf::from(text(3)),
+        })
+    })
+    .map(|rows| rows.flatten().collect())
+    .unwrap_or_default()
+}
+
+/// One Muse Code session by id.
+pub fn muse_session(id: &str) -> Option<MuseSession> {
+    muse_sessions().into_iter().find(|s| s.id == id)
+}
+
+/// Whether a Muse Code session is live: its runtime record exists and the process
+/// holding its socket lease still runs.
+pub fn muse_live(id: &str) -> bool {
+    let rec = muse_home()
+        .join("runtime/muse/sessions")
+        .join(format!("{id}.json"));
+    let text = match fs::read_to_string(&rec) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let hint = v["endpoint_hint"].as_str().unwrap_or("");
+    if hint.is_empty() {
+        return false;
+    }
+    let lease = muse_home()
+        .join("runtime/muse")
+        .join(format!("{hint}.lease"));
+    let lease_text = match fs::read_to_string(&lease) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let pid = serde_json::from_str::<Value>(&lease_text)
+        .ok()
+        .and_then(|v| v["pid"].as_i64())
+        .unwrap_or(0);
+    process_alive(pid)
+}
+
+/// The pids that may run a Muse Code session's TUI: the process holding its socket lease.
+pub fn muse_pids(id: &str) -> Vec<String> {
+    let rec = muse_home()
+        .join("runtime/muse/sessions")
+        .join(format!("{id}.json"));
+    let text = match fs::read_to_string(&rec) {
+        Ok(t) => t,
+        Err(_) => return vec![],
+    };
+    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let hint = v["endpoint_hint"].as_str().unwrap_or("");
+    if hint.is_empty() {
+        return vec![];
+    }
+    let lease = muse_home()
+        .join("runtime/muse")
+        .join(format!("{hint}.lease"));
+    match fs::read_to_string(&lease) {
+        Ok(t) => serde_json::from_str::<Value>(&t)
+            .ok()
+            .and_then(|v| v["pid"].as_i64())
+            .filter(|p| *p > 0)
+            .map(|p| vec![p.to_string()])
+            .unwrap_or_default(),
+        Err(_) => vec![],
+    }
+}
+
 pub fn claude_transcript(sid: &str) -> Option<PathBuf> {
     let projects = home().join(".claude/projects");
     fs::read_dir(projects)
@@ -315,6 +439,7 @@ pub fn session_cwd(addr: &Address) -> Option<PathBuf> {
             .into_iter()
             .find(|s| s["id"].as_str() == Some(addr.id.as_str()))
             .and_then(|s| opencode_dir(&s)),
+        "muse" => muse_session(&addr.id).map(|s| s.dir).filter(|c| !c.is_empty()),
         _ => antigravity_sessions()
             .into_iter()
             .find(|s| s.id == addr.id)
@@ -333,6 +458,46 @@ fn content_text(content: &Value) -> String {
             .join(" "),
         _ => String::new(),
     }
+}
+
+/// The turns of a Muse Code session's log, oldest first: user prompts from
+/// `runtime.user_intent.accepted` refill blocks, assistant turns from
+/// `assistant_message_committed`.
+fn muse_turns(log: &Path) -> Vec<(String, String)> {
+    let mut turns: Vec<(String, String)> = vec![];
+    let f = match File::open(log) {
+        Ok(f) => f,
+        Err(_) => return turns,
+    };
+    for line in BufReader::new(f).lines().map_while(Result::ok) {
+        let Ok(d) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let pt = d["payload_type"].as_str().unwrap_or("");
+        if pt == "runtime.user_intent.accepted" {
+            let txt = d["payload"]["refill_blocks"]
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|b| b["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default();
+            if !txt.trim().is_empty() {
+                turns.push(("user".to_string(), txt));
+            }
+        } else if pt == "runtime.session" {
+            if d["payload"]["event"]["kind"].as_str() == Some("assistant_message_committed") {
+                let txt = d["payload"]["event"]["text"].as_str().unwrap_or("");
+                if !txt.trim().is_empty() {
+                    turns.push(("assistant".to_string(), txt.to_string()));
+                }
+            }
+        }
+    }
+    turns
 }
 
 /// The last turns of a session, as (role, text); Antigravity gives its summary instead.
@@ -387,6 +552,16 @@ pub fn show(addr: &Address, last: usize) -> Res<Vec<String>> {
                     }
                 }
             }
+        }
+        "muse" => {
+            let s = muse_session(&addr.id).ok_or_else(|| {
+                format!(
+                    "no Muse Code session {} in {}",
+                    addr.id,
+                    muse_home().join("session-index.db").display()
+                )
+            })?;
+            turns = muse_turns(&s.log);
         }
         "opencode" => {
             let path = format!("/api/session/{}/message", addr.id);

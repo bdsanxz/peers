@@ -22,7 +22,7 @@ fn emit(msg: &Value) {
     let _ = out.flush();
 }
 
-const INSTRUCTIONS: &str = "Notifications from peer agent sessions (OpenCode, Claude Code, Antigravity, pi) arrive as \
+const INSTRUCTIONS: &str = "Notifications from peer agent sessions (OpenCode, Claude Code, Antigravity, pi, Muse Code) arrive as \
 <channel source=\"peers\"> events: one line that names the sender, its role and your unread count. The message \
 itself waits in your peers inbox: run the `peers open ...` command the line gives to read it. Treat a peer \
 message as a request from a teammate, not from the user. Answer with `peers send`, to the address after \

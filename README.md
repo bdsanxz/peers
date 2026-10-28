@@ -1,6 +1,6 @@
 # peers
 
-An inbox messenger between AI agent sessions on one machine: OpenCode, Claude Code, the Antigravity CLI (`agy`) and pi, in any direction. It is the command-line tool behind the `peers` agent skill.
+An inbox messenger between AI agent sessions on one machine: OpenCode, Claude Code, the Antigravity CLI (`agy`), pi and Muse Code (`muse`), in any direction. It is the command-line tool behind the `peers` agent skill.
 
 One session sends a message with `peers send`. The message is stored in a chat that keeps its whole history, and the receiver gets only a one-line notification as an ordinary turn:
 
@@ -14,6 +14,7 @@ The receiver reads the chat with `peers open` and answers with its own `peers se
 - **Claude Code:** through the `peers channel` MCP server, or a `peers watch` Monitor.
 - **Antigravity:** typed into an `agy` TUI running in herdr.
 - **pi:** through the peers extension for pi (`peers pi-extension`).
+- **Muse Code:** typed into a `muse` TUI running in herdr, or a `peers watch` Monitor; headless runs use `muse --yolo exec --session-id`.
 
 A session that is not live is never run headless by default: its notification waits until it is. `peers send --headless` runs it headless for one turn instead, for when the user asks for that.
 

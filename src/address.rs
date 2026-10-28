@@ -3,7 +3,7 @@
 use crate::util::Res;
 use std::fmt;
 
-pub const RUNTIMES: [&str; 4] = ["opencode", "claude", "antigravity", "pi"];
+pub const RUNTIMES: [&str; 5] = ["opencode", "claude", "antigravity", "pi", "muse"];
 pub const KINDS: [&str; 6] = [
     "request",
     "ack",
@@ -32,7 +32,7 @@ impl Address {
         let (runtime, id) = s.split_once(':').unwrap_or(("", ""));
         if !RUNTIMES.contains(&runtime) || id.is_empty() {
             return Err(format!(
-                "bad address {s:?}; expected opencode:<ses_...>, claude:<uuid>, antigravity:<uuid> or pi:<session id> (see `peers --help`)"
+                "bad address {s:?}; expected opencode:<ses_...>, claude:<uuid>, antigravity:<uuid>, pi:<session id> or muse:<uuid> (see `peers --help`)"
             ));
         }
         if runtime == "opencode" && !id.starts_with("ses") {

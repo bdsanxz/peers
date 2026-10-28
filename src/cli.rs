@@ -11,7 +11,7 @@ use serde_json::json;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
-const ABOUT: &str = "peers — inbox messenger between agent sessions on this machine (OpenCode, Claude Code, Antigravity, pi)";
+const ABOUT: &str = "peers — inbox messenger between agent sessions on this machine (OpenCode, Claude Code, Antigravity, pi, Muse Code)";
 
 const AFTER_HELP: &str = r#"How it works:
   1. peers send <peer> --kind request --seq 1 --body "<text>"
@@ -25,6 +25,7 @@ Addresses:
   claude:<session uuid>            a Claude Code session
   antigravity:<conversation uuid>  an Antigravity conversation
   pi:<session id>                  a pi session
+  muse:<session uuid>              a Muse Code session
 
 For agents:
   - After a send, end your turn: never sleep, poll, loop or re-open to wait for the answer.
@@ -45,6 +46,8 @@ Environment:
   AGY_HOME                Antigravity's data directory (default ~/.gemini/antigravity-cli)
   PI_CODING_AGENT_SESSION_DIR, PI_CODING_AGENT_DIR
                           where pi saves its sessions (default ~/.pi/agent/sessions)
+  XDG_DATA_HOME           where Muse Code keeps its data (its session index lives under
+                          $XDG_DATA_HOME/muse, else ~/.local/share/muse)
 
 Exit codes:
   0  success
@@ -79,6 +82,7 @@ Identity, first match wins:
   CLAUDE_CODE_SESSION_ID         Claude Code
   ANTIGRAVITY_CONVERSATION_ID    Antigravity
   PI_SESSION_ID                  pi
+  MUSE_SESSION_ID                Muse Code
   (when several are set, the nearest runtime process among your ancestors decides)
 
 Notes:
@@ -104,6 +108,7 @@ Default filter, each lifted by a flag:
 
 Notes:
   - Asks each runtime directly, not the peers database.
+  - Muse Code sessions come from its session index, live when their process runs.
 
 Examples:
   peers list
@@ -145,12 +150,15 @@ Notification route, by target. Nothing runs headless unless you pass --headless:
   antigravity:<uuid>, anything else   queued; the inbox keeps the message (`peers chats`)
   pi:<id>, peers extension listening  queued for the extension; arrives as a turn
   pi:<id>, no listener                queued for when it next starts with the peers extension
+  muse:<uuid>, TUI in herdr           typed into the muse TUI
+  muse:<uuid>, anything else          queued for its armed `peers watch` (a Monitor event)
 
 With --headless, a target that is not live is run headless for one turn instead:
   opencode   resumed in the OpenCode service
   claude     `claude -p --resume`
   antigravity  `agy -p`, one run at a time, in order (refused for a TUI outside herdr)
   pi         `pi --session <file>`, one run at a time, in order
+  muse       `muse exec --session-id <id>`, one run at a time, in order (refused for a TUI outside herdr)
 
 Notes:
   - After it, end your turn: never sleep, poll or re-open the chat to wait for the answer.
@@ -279,7 +287,8 @@ Examples:
   one line per notification; it never exits on its own
 
 Notes:
-  - For a Claude Code session without the peers channel: arm it once as a Monitor command.
+  - For a Claude Code session without the peers channel, or a Muse Code session: arm it once
+    as a Monitor command.
   - Reads your own squad's notification queue; ignores --squad.
 
 Examples:
@@ -326,7 +335,7 @@ Examples:
     },
 
     /// Print the last turns of a session's own transcript
-    #[command(after_help = r#"Output, OpenCode, Claude and pi:
+    #[command(after_help = r#"Output, OpenCode, Claude, pi and muse:
   user: <turn text, cut to 400 characters>
   assistant: <turn text, cut to 400 characters>
 
@@ -335,6 +344,10 @@ Output, Antigravity (its turns are protobuf):
   status: <status>
   modified: <time>
   preview: <preview>
+
+Output, muse (from its session log):
+  user: <prompt text, cut to 400 characters>
+  assistant: <turn text, cut to 400 characters>
 
 Notes:
   - Reads the session's own transcript, not the peers chat.
@@ -362,6 +375,14 @@ Examples:
     /// Internal: runs spooled pi notifications in order.
     #[command(name = "_drain-pi", hide = true)]
     DrainPi {
+        id: String,
+        #[arg(long)]
+        root: PathBuf,
+    },
+
+    /// Internal: runs spooled muse notifications in order.
+    #[command(name = "_drain-muse", hide = true)]
+    DrainMuse {
         id: String,
         #[arg(long)]
         root: PathBuf,
@@ -446,6 +467,7 @@ pub fn run(cli: Cli) -> Res<()> {
         }
         Cmd::PiListen { address, cwd } => channel::run_pi_listen(&address, cwd.as_deref()),
         Cmd::DrainPi { id, root } => deliver::drain_pi(&id, &root),
+        Cmd::DrainMuse { id, root } => deliver::drain_muse(&id, &root),
     }
 }
 
@@ -559,6 +581,20 @@ fn cmd_list(all_dirs: bool, all: bool, children: bool) -> Res<()> {
             "conversation".into(),
             s.status,
             s.dirs.first().cloned().unwrap_or_default(),
+            s.title,
+        ));
+    }
+    for s in runtime::muse_sessions() {
+        rows.push((
+            format!("muse:{}", s.id),
+            "session".into(),
+            if runtime::muse_live(&s.id) {
+                "live"
+            } else {
+                "idle"
+            }
+            .into(),
+            s.dir,
             s.title,
         ));
     }

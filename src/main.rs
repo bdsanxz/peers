@@ -1,4 +1,4 @@
-//! peers: an inbox messenger between OpenCode, Claude Code and Antigravity
+//! peers: an inbox messenger between OpenCode, Claude Code, Antigravity, pi and Muse Code
 //! agent sessions on this machine. See `peers --help`.
 
 mod address;

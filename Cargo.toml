@@ -1,8 +1,8 @@
 [package]
 name = "peers"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
-description = "Inbox messenger between OpenCode, Claude Code, Antigravity and pi agent sessions on one machine"
+description = "Inbox messenger between OpenCode, Claude Code, Antigravity, pi and Muse Code agent sessions on one machine"
 repository = "https://github.com/bdsanxz/peers"
 license = "GPL-3.0-or-later"
 publish = false
@@ -17,6 +17,9 @@ clap = { version = "4.6", features = ["derive"] }
 libc = "0.2"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde_json = "1"
+
+[dev-dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [profile.release]
 strip = true

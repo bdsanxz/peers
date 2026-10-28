@@ -1,7 +1,8 @@
-//! End-to-end checks of the peers binary against stubs of the claude, opencode, agy and herdr
-//! CLIs, each test in its own temporary HOME and cache. No real session, inbox or workspace is
-//! touched.
+//! End-to-end checks of the peers binary against stubs of the claude, opencode, agy, pi, muse
+//! and herdr CLIs, each test in its own temporary HOME and cache. No real session, inbox or
+//! workspace is touched.
 
+use rusqlite::Connection;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -17,6 +18,7 @@ const C: &str = "claude:cccccccc-cccc-cccc-cccc-cccccccccccc";
 const STOPPED: &str = "claude:99999999-9999-9999-9999-999999999999";
 const AGY: &str = "antigravity:33333333-3333-3333-3333-333333333333";
 const PI: &str = "pi:01a176bc-0000-7000-8000-000000000001";
+const MUSE: &str = "muse:01a180c2-0000-7000-8000-000000000001";
 
 struct Env {
     tmp: PathBuf,
@@ -85,6 +87,15 @@ echo '{"conversation_id":"33333333-3333-3333-3333-333333333333","status":"SUCCES
 echo start >>"$HOME/pi-timeline"; sleep 0.3; echo end >>"$HOME/pi-timeline"
 echo '{"type":"agent_end"}'"#,
         );
+        // `muse exec --session-id <id> --prompt-file <f> --json ...` records its arguments and
+        // working directory.
+        stub(
+            &bin,
+            "muse",
+            r#"printf '%s\n' "$@" >"$HOME/muse-args"; pwd >"$HOME/muse-cwd"
+echo start >>"$HOME/muse-timeline"; sleep 0.3; echo end >>"$HOME/muse-timeline"
+echo '{"ok":true}'"#,
+        );
         Env { tmp }
     }
 
@@ -106,6 +117,46 @@ echo '{"type":"agent_end"}'"#,
         )
         .unwrap();
         file
+    }
+
+    /// Saves a Muse Code session for MUSE, working in `cwd`: one row in the session index, a
+    /// runtime record with a lease held by this test process (so it counts as live), and a log
+    /// with one user turn and one assistant turn.
+    fn save_muse_session(&self, cwd: &Path) {
+        let id = MUSE.trim_start_matches("muse:");
+        let data = self.home().join(".local/share/muse");
+        fs::create_dir_all(data.join("runtime/muse/sessions")).unwrap();
+        let log = cwd.join(format!("{id}.session.jsonl"));
+        fs::write(
+            &log,
+            format!(
+                "{{\"schema_version\":1,\"sequence\":1,\"payload_type\":\"runtime.user_intent.accepted\",\"payload\":{{\"refill_blocks\":[{{\"kind\":\"text\",\"text\":\"hello muse\"}}]}}}}\n\
+                 {{\"schema_version\":1,\"sequence\":2,\"payload_type\":\"runtime.session\",\"payload\":{{\"kind\":\"run\",\"event\":{{\"kind\":\"assistant_message_committed\",\"text\":\"hi there\"}}}}}}\n"
+            ),
+        )
+        .unwrap();
+        let db = data.join("session-index.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, title TEXT, workspace_root TEXT, session_log_path TEXT, updated_at_us INTEGER)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, title, workspace_root, session_log_path, updated_at_us) VALUES (?1, ?2, ?3, ?4, ?5)",
+            (id, "writer", &cwd.display().to_string(), &log.display().to_string(), 1i64),
+        )
+        .unwrap();
+        drop(conn);
+        fs::write(
+            data.join(format!("runtime/muse/sessions/{id}.json")),
+            r#"{"session_id":"x","endpoint_hint":"ms-test.sock"}"#,
+        )
+        .unwrap();
+        fs::write(
+            data.join("runtime/muse/ms-test.sock.lease"),
+            format!("{{\"pid\":{}}}", std::process::id()),
+        )
+        .unwrap();
     }
 
     fn home(&self) -> PathBuf {
@@ -320,6 +371,21 @@ fn whoami_reads_each_runtime() {
         )
         .out,
         "antigravity:conv1",
+    );
+    has(
+        &e.run_env(None, &d, &[("PI_SESSION_ID", "s1")], &["whoami"], None).out,
+        "pi:s1",
+    );
+    has(
+        &e.run_env(
+            None,
+            &d,
+            &[("MUSE_SESSION_ID", "m1")],
+            &["whoami"],
+            None,
+        )
+        .out,
+        "muse:m1",
     );
     let o = e.run_env(
         None,
@@ -1579,4 +1645,108 @@ fn pi_extension_is_printed_and_rejects_other_runtimes() {
     let o = e.run(A, &d, &["_pi-listen", A]);
     assert_eq!(o.code, 2);
     has(&o.all(), "serves pi sessions only");
+}
+
+#[test]
+fn muse_session_is_found_listed_and_shown() {
+    let e = Env::new("muse-show");
+    let d = e.dir("w");
+    e.save_muse_session(&d);
+    let id = MUSE.trim_start_matches("muse:");
+    let who = e.run_env(None, &d, &[("MUSE_SESSION_ID", id)], &["whoami"], None);
+    assert_eq!(who.out.trim(), MUSE, "{}", who.all());
+    let list = e.ok(A, &d, &["list"]);
+    has(
+        &list,
+        &format!("{MUSE}  kind=session  status=live  name=\"writer\""),
+    );
+    let shown = e.ok(A, &d, &["show", MUSE]);
+    has(&shown, "user: hello muse\nassistant: hi there\n");
+}
+
+#[test]
+fn muse_without_a_tui_queues_and_runs_headless_one_at_a_time() {
+    let e = Env::new("muse-headless");
+    let d = e.dir("w");
+    e.save_muse_session(&d);
+    // Without --headless the message waits for the session's armed `peers watch`.
+    let queued = e.ok(
+        A,
+        &d,
+        &[
+            "send", MUSE, "--kind", "notice", "--seq", "0", "--body", "not yet",
+        ],
+    );
+    has(&queued, "queued, not delivered yet");
+    let sent = e.ok(
+        A,
+        &d,
+        &[
+            "send",
+            MUSE,
+            "--kind",
+            "request",
+            "--seq",
+            "1",
+            "--body",
+            "write it",
+            "--headless",
+        ],
+    );
+    has(&sent, "notified via headless resume");
+    wait_for("the first muse run", 20, || {
+        fs::read_to_string(e.home().join("muse-timeline"))
+            .unwrap_or_default()
+            .contains("end")
+    });
+    let args = fs::read_to_string(e.home().join("muse-args")).unwrap();
+    let lines: Vec<&str> = args.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| *l == "--prompt-file")
+        .expect("muse exec takes --prompt-file");
+    assert_eq!(&lines[..3], &["exec", "--session-id", MUSE.trim_start_matches("muse:")]);
+    has(&args, "--json");
+    has(&args, "--yolo");
+    lacks(&args, "write it");
+    // The spooled notification (not the raw body) reaches the headless run through the file.
+    let prompt = fs::read_to_string(lines[at + 1]).unwrap();
+    has(&prompt, "Read it with");
+    // The headless run joins the session in its own directory.
+    assert_eq!(
+        fs::read_to_string(e.home().join("muse-cwd")).unwrap().trim(),
+        d.display().to_string()
+    );
+    // A muse session id that was never indexed fails its notification with the missing session.
+    let o = e.run(
+        A,
+        &d,
+        &[
+            "send",
+            "muse:00000000-0000-0000-0000-000000000000",
+            "--kind",
+            "notice",
+            "--seq",
+            "2",
+            "--body",
+            "hi",
+            "--headless",
+        ],
+    );
+    assert_eq!(o.code, 2);
+    has(&o.all(), "no Muse Code session");
+}
+
+#[test]
+fn muse_address_parses_and_rejects_its_own_session() {
+    let e = Env::new("muse-self");
+    let d = e.dir("w");
+    e.save_muse_session(&d);
+    let o = e.run(
+        MUSE,
+        &d,
+        &["send", MUSE, "--kind", "notice", "--seq", "1", "--body", "hi"],
+    );
+    assert_eq!(o.code, 2);
+    has(&o.all(), "refusing to send a message to yourself");
 }

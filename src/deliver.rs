@@ -17,13 +17,21 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// What a headless run would need to know, before anything is stored: an agy TUI outside herdr
-/// would interleave with a headless run, so --headless is refused for it.
+/// What a headless run would need to know, before anything is stored: an agy or muse TUI
+/// outside herdr would interleave with a headless run, so --headless is refused for either.
 pub fn precheck(target: &Address, headless: bool) -> Res<()> {
     if headless && target.runtime == "antigravity" {
         if let Tui::Terminal(tty) = antigravity_tui(&target.id) {
             return Err(format!(
                 "{target} is open in an agy TUI on {tty}, outside herdr, and a headless run would interleave \
+                 with it; send without --headless, or ask the user to close it there or to run it in herdr"
+            ));
+        }
+    }
+    if headless && target.runtime == "muse" {
+        if let Tui::Terminal(tty) = muse_tui(&target.id) {
+            return Err(format!(
+                "{target} is open in a muse TUI on {tty}, outside herdr, and a headless run would interleave \
                  with it; send without --headless, or ask the user to close it there or to run it in herdr"
             ));
         }
@@ -53,6 +61,7 @@ pub fn notify(
         "opencode" => notify_opencode(&target.id, text, headless),
         "antigravity" => notify_antigravity(target, home, text, meta, headless),
         "pi" => notify_pi(target, home, text, meta, headless),
+        "muse" => notify_muse(target, home, text, meta, headless),
         _ => {
             let address = target.to_string();
             // A listening channel proves the session is live; check it before asking claude.
@@ -298,11 +307,11 @@ fn herdr_json(args: &[&str]) -> Value {
 }
 
 /// (session, pane) of the herdr pane that runs one of `pids`. Herdr shows no pane ttys, so the
-/// match is by process: the pane's shell or foreground process is the agy process or one of its
+/// match is by process: the pane's shell or foreground process is the agent process or one of its
 /// ancestors.
-fn herdr_pane(pids: &[String]) -> Option<(String, String)> {
+fn herdr_pane_for(kind: &str, pids: &[String]) -> Option<(String, String)> {
     let ancestors: BTreeSet<String> = pids.iter().flat_map(|p| process_ancestors(p)).collect();
-    for (name, agent) in herdr_agents("agy") {
+    for (name, agent) in herdr_agents(kind) {
         let Some(pane) = agent["pane_id"].as_str() else {
             continue;
         };
@@ -320,6 +329,39 @@ fn herdr_pane(pids: &[String]) -> Option<(String, String)> {
         }
     }
     None
+}
+
+fn herdr_pane(pids: &[String]) -> Option<(String, String)> {
+    herdr_pane_for("agy", pids)
+}
+
+/// Where a Muse Code session's TUI runs, if anywhere. Its lease pid has a terminal when it is
+/// a TUI; a headless run has none.
+pub(crate) fn muse_tui(sid: &str) -> Tui {
+    let pids = runtime::muse_pids(sid);
+    if pids.is_empty() {
+        return Tui::None;
+    }
+    let mut ttys = BTreeSet::new();
+    for pid in &pids {
+        let tty = quiet("ps", &["-o", "tty=", "-p", pid]);
+        if !tty.is_empty() && !tty.contains('?') {
+            ttys.insert(if tty.starts_with("/dev/") {
+                tty
+            } else {
+                format!("/dev/{tty}")
+            });
+        }
+    }
+    let Some(first) = ttys.into_iter().next() else {
+        return Tui::None;
+    };
+    if which("herdr").is_some() {
+        if let Some((session, pane)) = herdr_pane_for("muse", &pids) {
+            return Tui::Herdr(session, pane);
+        }
+    }
+    Tui::Terminal(first)
 }
 
 fn queue_dir(home_dir: &Path, cid: &str) -> Res<PathBuf> {
@@ -577,6 +619,144 @@ fn notify_pi(
          drainer={pid} log={}",
         log.display()
     ))
+}
+
+/// A muse session with an armed `peers watch` takes the notification from its queue as a
+/// Monitor event; a live muse TUI in herdr gets it typed in; any other muse session finds it
+/// queued when it next arms a watch, or, with `headless`, gets one headless run per notification,
+/// in order.
+fn notify_muse(
+    target: &Address,
+    home: &Store,
+    text: &str,
+    meta: &Value,
+    headless: bool,
+) -> Res<String> {
+    let sid = target.id.as_str();
+    let address = target.to_string();
+    let qdir = runtime_queue_dir(&home.dir, "muse", sid)?;
+    match muse_tui(sid) {
+        Tui::Herdr(session, pane) => {
+            // This notification counts every unread message, so earlier queued ones are stale.
+            let mut h = Store::open(&home.root)?;
+            let _ = h.take_notifications(&address);
+            paste_into_tui(&qdir, &session, &pane, text).map_err(|e| {
+                format!(
+                    "muse:{sid} is open in a muse TUI (herdr session {session} pane {pane}) but the \
+                     notification did not reach it: {e}; look at that pane, since muse may be waiting on a dialog"
+                )
+            })?;
+            return Ok(format!(
+                "notified by typing into its live muse TUI (herdr session {session} pane {pane}; it queues while muse is busy)"
+            ));
+        }
+        Tui::Terminal(tty) => {
+            home.push_notification(&address, text, meta)?;
+            return Ok(queued(
+                &format!("{target} is open in a muse TUI on {tty}, outside herdr, where peers cannot type"),
+                "when its TUI runs in herdr and the next message arrives, or through its armed `peers watch`; until then it shows in `peers chats`",
+            ));
+        }
+        Tui::None if !headless => {
+            home.push_notification(&address, text, meta)?;
+            return Ok(queued(
+                &format!("{target} is not open in a muse TUI"),
+                "through its armed `peers watch` (as a Monitor event), or when its TUI runs in herdr and the next message arrives; until then it shows in `peers chats`",
+            ));
+        }
+        Tui::None => {}
+    }
+    if which("muse").is_none() {
+        return Err("muse is not on PATH".into());
+    }
+    // A muse session is indexed once it has run; headless runs join it by id.
+    if runtime::muse_session(sid).is_none() {
+        return Err(format!(
+            "no Muse Code session {sid} in {}; a muse session is indexed once it has run",
+            runtime::muse_home().join("session-index.db").display()
+        ));
+    }
+    let (pid, s) = spool(
+        home,
+        "muse",
+        sid,
+        text,
+        &[
+            "_drain-muse".as_ref(),
+            sid.as_ref(),
+            "--root".as_ref(),
+            home.root.as_os_str(),
+        ],
+    )?;
+    let log = home
+        .dir
+        .join("logs")
+        .join(format!("muse-{sid}-{s}.jsonl"));
+    Ok(format!(
+        "notified via headless resume (queued behind any run in progress) drainer={pid} log={}",
+        log.display()
+    ))
+}
+
+/// Runs the spooled notifications of one muse session, one headless run at a time. A notification
+/// whose session meanwhile arms `peers watch` or opens its TUI in herdr goes there instead.
+pub fn drain_muse(id: &str, root: &Path) -> Res<()> {
+    let store = Store::open(root)?;
+    let address = Address::new("muse", id).to_string();
+    let qdir = runtime_queue_dir(&store.dir, "muse", id)?;
+    let logs = logs_dir(&store)?;
+    let sess = runtime::muse_session(id);
+    loop {
+        let Some(lock) = flock(&qdir.join(".lock"), true)? else {
+            return Ok(()); // the drainer holding the lock takes this one next
+        };
+        while let Some(entry) = pending(&qdir).into_iter().next() {
+            let text = fs::read_to_string(&entry).map_err(|e| e.to_string())?;
+            if store.listener_alive(&address)? {
+                store.push_notification(&address, &text, &json!({}))?;
+                let _ = fs::remove_file(&entry);
+                continue;
+            }
+            if let Tui::Herdr(session, pane) = muse_tui(id) {
+                // Opened in a TUI meanwhile: deliver there instead.
+                paste_into_tui(&qdir, &session, &pane, &text)?;
+                let _ = fs::remove_file(&entry);
+                continue;
+            }
+            let s = entry
+                .file_stem()
+                .map(|x| x.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let log = logs.join(format!("muse-{id}-{s}.jsonl"));
+            let prompt_file = logs.join(format!("muse-{id}-{s}.prompt.md"));
+            let _ = fs::write(&prompt_file, &text);
+            let out = File::create(&log).map_err(|e| e.to_string())?;
+            let err = out.try_clone().map_err(|e| e.to_string())?;
+            // A headless peer always runs with --yolo: nobody answers approval prompts, and the
+            // prompt goes in a file so no quoting can swallow it.
+            let mut cmd = Command::new("muse");
+            cmd.args([
+                "exec",
+                "--session-id",
+                id,
+                "--prompt-file",
+                &prompt_file.to_string_lossy(),
+                "--json",
+                "--yolo",
+            ]);
+            if let Some(sess) = sess.as_ref() {
+                if Path::new(&sess.dir).is_dir() {
+                    cmd.current_dir(&sess.dir);
+                }
+            }
+            let _ = cmd.stdin(Stdio::null()).stdout(out).stderr(err).status();
+            let _ = fs::remove_file(&entry);
+        }
+        drop(lock);
+        if pending(&qdir).is_empty() {
+            return Ok(()); // a notification spooled while unlocking needs another pass
+        }
+    }
 }
 
 /// Runs the spooled notifications of one pi session, one headless pi run at a time. A notification

@@ -4,7 +4,7 @@
 //! over when it is asked to message a replaced one.
 
 use crate::address::Address;
-use crate::deliver::{antigravity_tui, opencode_open, Tui};
+use crate::deliver::{antigravity_tui, muse_tui, opencode_open, Tui};
 use crate::runtime;
 use crate::store::{Profile, Store};
 use crate::util::Res;
@@ -35,6 +35,7 @@ impl Status {
 pub struct Presence {
     claude: Option<Vec<String>>,
     opencode: Option<Vec<Value>>,
+    muse: Option<Vec<String>>,
 }
 
 impl Presence {
@@ -70,6 +71,22 @@ impl Presence {
             }
             "antigravity" => !matches!(antigravity_tui(&a.id), Tui::None),
             "pi" => store.listener_alive(addr)?,
+            "muse" => {
+                if store.listener_alive(addr)? {
+                    return Ok(true);
+                }
+                if self.muse.is_none() {
+                    self.muse = Some(
+                        runtime::muse_sessions()
+                            .into_iter()
+                            .filter(|s| runtime::muse_live(&s.id))
+                            .map(|s| s.id)
+                            .collect(),
+                    );
+                }
+                self.muse.as_ref().is_some_and(|ids| ids.contains(&a.id))
+                    || !matches!(muse_tui(&a.id), Tui::None)
+            }
             _ => false,
         })
     }

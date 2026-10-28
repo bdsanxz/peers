@@ -8,11 +8,12 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// Each runtime's own session id variable, as it sets it in its tool shells.
-pub const SELF_VARS: [(&str, &str); 4] = [
+pub const SELF_VARS: [(&str, &str); 5] = [
     ("opencode", "OPENCODE_SESSION_ID"),
     ("claude", "CLAUDE_CODE_SESSION_ID"),
     ("antigravity", "ANTIGRAVITY_CONVERSATION_ID"),
     ("pi", "PI_SESSION_ID"),
+    ("muse", "MUSE_SESSION_ID"),
 ];
 
 pub fn basename_lower(comm: &str) -> String {
@@ -40,14 +41,19 @@ pub fn find_ancestor<T>(mut f: impl FnMut(u32, &str) -> Option<T>) -> Option<T> 
     None
 }
 
-/// Runtime of the nearest ancestor process that is opencode, claude, agy or pi.
+/// Runtime of the nearest ancestor process that is opencode, claude, agy, pi or muse.
 fn innermost_runtime() -> Option<&'static str> {
-    find_ancestor(|_, comm| match basename_lower(comm).as_str() {
-        "opencode" => Some("opencode"),
-        "claude" => Some("claude"),
-        "agy" => Some("antigravity"),
-        "pi" => Some("pi"),
-        _ => None,
+    find_ancestor(|_, comm| {
+        let base = basename_lower(comm);
+        match base.as_str() {
+            "opencode" => Some("opencode"),
+            "claude" => Some("claude"),
+            "agy" => Some("antigravity"),
+            "pi" => Some("pi"),
+            "muse" => Some("muse"),
+            _ if base.starts_with("muse-bin") => Some("muse"),
+            _ => None,
+        }
     })
 }
 
@@ -93,13 +99,14 @@ fn detected_address() -> Res<Address> {
     match found.len() {
         0 => Err(format!(
             "cannot tell which session this is: none of {} is set. Run this from inside an OpenCode, \
-             Claude Code, Antigravity or pi session, or set PEERS_SELF=<address>.",
+             Claude Code, Antigravity, pi or Muse Code session, or set PEERS_SELF=<address>.",
             names(true)
         )),
         1 => Ok(Address::new(found[0].0, &found[0].1)),
         _ => {
             // A peer launched from another runtime's shell inherits that runtime's
             // variable too; the nearest ancestor process says which session we are.
+            // A muse TUI runs as muse-bin-<version>, so innermost_runtime matches its prefix.
             if let Some(rt) = innermost_runtime() {
                 if let Some((_, id)) = found.iter().find(|(r, _)| *r == rt) {
                     return Ok(Address::new(rt, id));
