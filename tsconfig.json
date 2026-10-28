@@ -9,8 +9,8 @@
     "noUncheckedIndexedAccess": true,
     "noUnusedLocals": true,
     "noEmit": true,
-    "skipLibCheck": true,
-    "paths": { "@earendil-works/pi-coding-agent": ["./node_modules/@earendil-works/pi-coding-agent"] }
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true
   },
-  "include": ["../src/pi_extension.ts", "test"]
+  "include": ["src", "test", "build.ts"]
 }
