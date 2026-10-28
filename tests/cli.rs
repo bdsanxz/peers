@@ -259,10 +259,12 @@ echo '{"ok":true}'"#,
         )
     }
 
-    /// Starts `peers watch` for `me` and returns the first `n` lines it prints.
-    fn watch_lines(&self, me: &str, cwd: &Path, n: usize) -> Vec<String> {
+    /// Starts `peers _drain` for `me` and returns the lines it prints: the session's pending
+    /// notifications, once. Live sessions never use this; they read the queue through the channel,
+    /// the pi extension, or a herdr TUI paste.
+    fn drain_lines(&self, me: &str, cwd: &Path, n: usize) -> Vec<String> {
         let mut child = self
-            .command(Some(me), cwd, &[], &["watch"])
+            .command(Some(me), cwd, &[], &["_drain"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
@@ -273,8 +275,8 @@ echo '{"ok":true}'"#,
         lines
     }
 
-    fn watch_line(&self, me: &str, cwd: &Path) -> String {
-        self.watch_lines(me, cwd, 1).join("")
+    fn drain_line(&self, me: &str, cwd: &Path) -> String {
+        self.drain_lines(me, cwd, 1).join("")
     }
 }
 
@@ -523,7 +525,7 @@ fn receiver_gets_only_a_notification_and_reads_the_chat() {
         ),
     );
     e.send(A, &d, B, "2", "Second note.");
-    let lines = e.watch_lines(B, &d, 2);
+    let lines = e.drain_lines(B, &d, 2);
     assert_eq!(lines.len(), 2, "expected two notifications, got {lines:?}");
     let line = &lines[0];
     assert_eq!(line.trim(), format!("New message from Lena (lead). You have 1 unread message in your inbox. Read it with: peers open {A}"));
@@ -579,7 +581,7 @@ fn unread_count_spans_the_whole_inbox() {
     e.send(A, &d, B, "1", "from a");
     let sent = e.send(C, &d, B, "1", "from c");
     has(&sent, "(2 unread messages)");
-    let lines = e.watch_lines(B, &d, 2);
+    let lines = e.drain_lines(B, &d, 2);
     has(
         lines.get(1).map(String::as_str).unwrap_or(""),
         "You have 2 unread messages in your inbox.",
@@ -769,7 +771,7 @@ fn squad_members_in_their_own_directories_share_one_database() {
     let sent = e.send(A, &lead, B, "1", "hello squad");
     lacks(&sent, "--squad");
     has(
-        &e.watch_line(B, &backend),
+        &e.drain_line(B, &backend),
         &format!("Read it with: peers open {A}"),
     );
     has(&e.ok(B, &backend, &["open", A]), "hello squad");
@@ -824,10 +826,10 @@ fn outsider_talks_to_a_squad_through_the_squad_database() {
     );
     has(
         &sent,
-        &format!("the answer then with `peers open {B} --squad {ws_s}`"),
+        &format!("then read the answer with `peers open {B} --squad {ws_s}`"),
     );
     has(
-        &e.watch_line(B, &lead),
+        &e.drain_line(B, &lead),
         &format!("Read it with: peers open {C}\n"),
     );
     has(&e.ok(B, &lead, &["open", C]), "Build it.");
@@ -847,7 +849,7 @@ fn outsider_talks_to_a_squad_through_the_squad_database() {
         ],
     );
     has(
-        &e.watch_line(C, &mine),
+        &e.drain_line(C, &mine),
         &format!("Read it with: peers open {B} --squad {ws_s}"),
     );
     has(&e.ok(C, &mine, &["open", B, "--squad", &ws_s]), "Built.");
@@ -1035,7 +1037,7 @@ fn reply_hints_tell_the_sender_to_end_its_turn() {
     );
     has(
         &send(A, &["--kind", "request"]),
-        "Arm one Monitor watch on `peers watch`",
+        "Start it with the peers channel, or",
     );
     has(
         &send(A, &["--kind", "request", "--reply-to", "opencode:ses_boss"]),
@@ -1059,8 +1061,8 @@ fn stopped_claude_target_is_resumed_headless_with_the_notification() {
         !e.home().join("claude-args").exists(),
         "a stopped claude ran without --headless"
     );
-    // The queued notification reaches it when it next starts with a watch.
-    has(&e.watch_line(STOPPED, &d), "You have 1 unread message");
+    // The queued notification reaches it when it next starts with the channel.
+    has(&e.drain_line(STOPPED, &d), "You have 1 unread message");
     let sent = e.ok(
         A,
         &d,
@@ -1323,7 +1325,7 @@ fn role_and_name_come_from_flags_env_and_peers_json() {
         "send", B, "--kind", "notice", "--seq", "5", "--role", "user", "--body", "user",
     ]);
     // The notification names the sender with its role once, even when the name holds it.
-    let lines = e.watch_lines(B, &d, 5);
+    let lines = e.drain_lines(B, &d, 5);
     assert_eq!(lines.len(), 5, "expected five notifications, got {lines:?}");
     has(
         &lines[0],
@@ -1669,7 +1671,7 @@ fn muse_without_a_tui_queues_and_runs_headless_one_at_a_time() {
     let e = Env::new("muse-headless");
     let d = e.dir("w");
     e.save_muse_session(&d);
-    // Without --headless the message waits for the session's armed `peers watch`.
+    // Without --headless the message waits in the session's queue until its TUI runs in herdr.
     let queued = e.ok(
         A,
         &d,

@@ -144,14 +144,14 @@ Kinds:
 Notification route, by target. Nothing runs headless unless you pass --headless:
   opencode:<id>, running or in a TUI  steered into the session; an open idle TUI starts a turn
   opencode:<id>, neither              waits in its OpenCode inbox for the session's next turn
-  claude:<uuid>, live                 queued for its peers channel or `peers watch`
-  claude:<uuid>, stopped              queued for when it next starts with the channel or a watch
+  claude:<uuid>, live                 queued for its peers channel
+  claude:<uuid>, stopped              queued for when it next starts with the channel
   antigravity:<uuid>, TUI in herdr    typed into the agy TUI
   antigravity:<uuid>, anything else   queued; the inbox keeps the message (`peers chats`)
   pi:<id>, peers extension listening  queued for the extension; arrives as a turn
   pi:<id>, no listener                queued for when it next starts with the peers extension
   muse:<uuid>, TUI in herdr           typed into the muse TUI
-  muse:<uuid>, anything else          queued for its armed `peers watch` (a Monitor event)
+  muse:<uuid>, anything else          queued; the inbox keeps the message (`peers chats`)
 
 With --headless, a target that is not live is run headless for one turn instead:
   opencode   resumed in the OpenCode service
@@ -281,20 +281,6 @@ Examples:
         target: String,
     },
 
-    /// Stream this session's notifications, one line each, for a Monitor
-    #[command(after_help = r#"Output:
-  New message from Lena (lead). You have 1 unread message in your inbox. Read it with: peers open claude:<uuid>
-  one line per notification; it never exits on its own
-
-Notes:
-  - For a Claude Code session without the peers channel, or a Muse Code session: arm it once
-    as a Monitor command.
-  - Reads your own squad's notification queue; ignores --squad.
-
-Examples:
-  peers watch"#)]
-    Watch,
-
     /// Run the peers channel: an MCP stdio server for Claude Code
     #[command(after_help = r#"Notes:
   - Claude Code starts it from --mcp-config; do not run it by hand.
@@ -363,6 +349,10 @@ Examples:
         #[arg(long, default_value_t = 6, value_name = "N")]
         last: usize,
     },
+
+    /// Internal: print this session's pending notifications once and exit (tests).
+    #[command(name = "_drain", hide = true)]
+    Drain,
 
     /// Internal: holds a pi session's listener for its peers extension.
     #[command(name = "_pi-listen", hide = true)]
@@ -441,7 +431,7 @@ pub fn run(cli: Cli) -> Res<()> {
         Cmd::Chats => cmd_chats(squad),
         Cmd::Open { target, page } => cmd_open(&target, page, squad),
         Cmd::Delete { target } => cmd_delete(&target, squad),
-        Cmd::Watch => channel::run_watch(),
+        Cmd::Drain => channel::run_drain_once(),
         Cmd::Channel => channel::run_channel(),
         Cmd::ChannelConfig => {
             println!(
@@ -821,9 +811,9 @@ fn reply_hint(c: &Ctx, target: &Address) -> Res<String> {
                 )
             } else {
                 format!(
-                    "REPLY: this session has no peers channel; the notification of the answer lands in its notification \
-                     queue. Arm one Monitor watch on `peers watch` if none is armed, then end your turn; do not poll. \
-                     Read the answer then with `{open}`."
+                    "REPLY: this session has no peers channel (Claude Code) or live herdr TUI (Muse Code); the \
+                     notification of the answer waits in its notification queue. Start it with the peers channel, or \
+                     run its TUI in herdr, then read the answer with `{open}`."
                 )
             }
         }

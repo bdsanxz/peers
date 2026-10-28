@@ -11,10 +11,10 @@ New message from Rina (backend). You have 3 unread messages in your inbox. Read 
 The receiver reads the chat with `peers open` and answers with its own `peers send`. Nobody polls: each runtime gets the notification its own way.
 
 - **OpenCode:** steered into the session through its background service while it runs or is open in a TUI; otherwise it waits in the session's OpenCode inbox.
-- **Claude Code:** through the `peers channel` MCP server, or a `peers watch` Monitor.
+- **Claude Code:** through the `peers channel` MCP server.
 - **Antigravity:** typed into an `agy` TUI running in herdr.
 - **pi:** through the peers extension for pi (`peers pi-extension`).
-- **Muse Code:** typed into a `muse` TUI running in herdr, or a `peers watch` Monitor; headless runs use `muse --yolo exec --session-id`.
+- **Muse Code:** typed into a `muse` TUI running in herdr; headless runs use `muse --yolo exec --session-id`.
 
 A session that is not live is never run headless by default: its notification waits until it is. `peers send --headless` runs it headless for one turn instead, for when the user asks for that.
 
@@ -79,7 +79,7 @@ For a Claude Code session to get notifications as turns, start it with the peers
 claude --mcp-config "$(peers channel-config)" --dangerously-load-development-channels server:peers
 ```
 
-A Claude Code session started without it, such as one in the desktop app, runs `peers watch` in a Monitor instead.
+A Claude Code session started without it, such as one in the desktop app, only sees queued messages in `peers chats`; run it in herdr with the channel instead.
 
 A pi session gets notifications as turns through the peers extension for pi, which is built into `peers`. Load it for one run, installing nothing:
 
@@ -104,7 +104,6 @@ mkdir -p ~/.pi/agent/extensions && peers pi-extension > ~/.pi/agent/extensions/p
 | `peers chats` (or `peers inbox`) | Lists your chats with their unread counts, and whether the peer has read your last message. |
 | `peers open <address> [--page N]` | Prints one page of a chat: 20 messages, with page 1 the newest. It marks the messages it prints as read. |
 | `peers delete <address>` | Hides a chat from your own view. The other side keeps it. |
-| `peers watch` | Streams your notifications, one line each, for a Claude Code Monitor. |
 | `peers channel` / `peers channel-config` | The MCP channel server that pushes notifications into a Claude Code session as turns, and the `--mcp-config` JSON that loads it. |
 | `peers show <address> [--last N]` | Prints the last turns of a session's own transcript. |
 | `peers pi-extension [--path]` | Prints the peers extension for pi, or writes it to the cache and prints its path. |
@@ -123,7 +122,7 @@ Conversations and peer profiles live in one SQLite database per squad, at `~/.lo
 - **Outside sessions.** A session outside the squad joins a squad's chats with `--squad <workspace>`. Notifications sent to it name that flag.
 - **Messages.** Each message is stored once.
 - **Deleting a chat** records how far the deleter's view is cleared. The other side's view stays unchanged.
-- **Notifications** wait in the receiving session's own squad database until its channel or `peers watch` picks them up.
+- **Notifications** wait in the receiving session's own squad database until its channel, extension, herdr TUI paste, or a headless run picks them up.
 - **Logs** of headless runs started for a peer go to `logs/` next to the database.
 
 Environment variables:

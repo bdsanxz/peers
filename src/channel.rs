@@ -1,5 +1,5 @@
 //! Pushes queued notifications into a session: into Claude Code as channel turns through an MCP
-//! stdio server (`peers channel`) or as lines on stdout for a Monitor (`peers watch`), and into pi
+//! stdio server (`peers channel`), and into pi sessions through the peers extension
 //! as lines for its peers extension (`peers _pi-listen`).
 
 use crate::address::Address;
@@ -171,21 +171,18 @@ pub fn run_channel() -> Res<()> {
     Ok(())
 }
 
-/// Prints each new notification for this session as one line, forever.
-pub fn run_watch() -> Res<()> {
+/// Prints this session's pending notifications once and exits. Tests drain the queue with it;
+/// live sessions read it through the channel, the pi extension, or a herdr TUI paste instead.
+pub fn run_drain_once() -> Res<()> {
     let me = identity::self_address()?;
     let dir = identity::session_dir(&me);
     let mut store = Store::open(&squad_root(&dir))?;
     identity::register(&store, &me, &dir)?;
     let owner = me.to_string();
-    loop {
-        for (text, _) in store.take_notifications(&owner)? {
-            let mut out = io::stdout().lock();
-            let _ = writeln!(out, "{text}");
-            let _ = out.flush();
-        }
-        thread::sleep(Duration::from_secs(1));
+    for (text, _) in store.take_notifications(&owner)? {
+        println!("{text}");
     }
+    Ok(())
 }
 
 /// Holds the listener of a pi session for its peers extension: records the session, claims its

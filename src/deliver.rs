@@ -1,6 +1,6 @@
 //! Delivers the one-line notification of a new message into the receiver's session, by its
 //! runtime, only where the session is live: steered into a running or open OpenCode session,
-//! pushed through a Claude channel or watch queue, typed into an agy TUI in herdr, or pushed
+//! pushed through a Claude channel or its notification queue, typed into an agy TUI in herdr, or pushed
 //! through a pi session's peers extension. A session that is not live gets the notification queued
 //! for when it next opens, never a headless run, unless the sender passes --headless because the
 //! user asked for one.
@@ -71,7 +71,7 @@ pub fn notify(
             } else if runtime::claude_live(&target.id)? {
                 home.push_notification(&address, text, meta)?;
                 Ok("notified via notification queue (no peers channel is listening; the session sees it only \
-                    with an armed `peers watch`, or when it next starts with the peers channel)"
+                    when it next starts with the peers channel)"
                     .into())
             } else if headless {
                 notify_claude_resume(&target.id, home, text)
@@ -79,7 +79,7 @@ pub fn notify(
                 home.push_notification(&address, text, meta)?;
                 Ok(queued(
                     &format!("{target} is not running"),
-                    "when it next starts with the peers channel or arms `peers watch`",
+                    "when it next starts with the peers channel",
                 ))
             }
         }
@@ -621,10 +621,8 @@ fn notify_pi(
     ))
 }
 
-/// A muse session with an armed `peers watch` takes the notification from its queue as a
-/// Monitor event; a live muse TUI in herdr gets it typed in; any other muse session finds it
-/// queued when it next arms a watch, or, with `headless`, gets one headless run per notification,
-/// in order.
+/// A live muse TUI in herdr gets the notification typed in; any other muse session finds it
+/// queued, or, with `headless`, gets one headless run per notification, in order.
 fn notify_muse(
     target: &Address,
     home: &Store,
@@ -654,14 +652,14 @@ fn notify_muse(
             home.push_notification(&address, text, meta)?;
             return Ok(queued(
                 &format!("{target} is open in a muse TUI on {tty}, outside herdr, where peers cannot type"),
-                "when its TUI runs in herdr and the next message arrives, or through its armed `peers watch`; until then it shows in `peers chats`",
+                "when its TUI runs in herdr and the next message arrives; until then it shows in `peers chats`",
             ));
         }
         Tui::None if !headless => {
             home.push_notification(&address, text, meta)?;
             return Ok(queued(
                 &format!("{target} is not open in a muse TUI"),
-                "through its armed `peers watch` (as a Monitor event), or when its TUI runs in herdr and the next message arrives; until then it shows in `peers chats`",
+                "when its TUI runs in herdr and the next message arrives; until then it shows in `peers chats`",
             ));
         }
         Tui::None => {}
@@ -699,7 +697,7 @@ fn notify_muse(
 }
 
 /// Runs the spooled notifications of one muse session, one headless run at a time. A notification
-/// whose session meanwhile arms `peers watch` or opens its TUI in herdr goes there instead.
+/// whose session meanwhile opens its TUI in herdr goes there instead.
 pub fn drain_muse(id: &str, root: &Path) -> Res<()> {
     let store = Store::open(root)?;
     let address = Address::new("muse", id).to_string();

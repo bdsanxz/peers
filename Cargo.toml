@@ -1,6 +1,6 @@
 [package]
 name = "peers"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
 description = "Inbox messenger between OpenCode, Claude Code, Antigravity, pi and Muse Code agent sessions on one machine"
 repository = "https://github.com/bdsanxz/peers"

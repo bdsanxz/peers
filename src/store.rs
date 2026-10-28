@@ -1,5 +1,5 @@
 //! The squad database: peer profiles, conversations, per-viewer chat deletions, and the
-//! notification queue that the channel and `watch` drain.
+//! notification queue that the channel, the pi extension, herdr TUI pastes and headless drains read.
 //!
 //! One database per squad workspace, at ~/.local/cache/peers/<dashed path>/bd.sql. A message is
 //! stored once; each side's view of a chat starts after the point it last deleted the chat.
