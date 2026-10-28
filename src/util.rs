@@ -16,7 +16,10 @@ pub fn one_line(s: &str) -> String {
 }
 
 pub fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 pub fn local_time(ms: i64) -> String {
@@ -38,7 +41,9 @@ pub fn stamp() -> String {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 pub fn env_nonempty(key: &str) -> Option<String> {
@@ -63,7 +68,8 @@ pub fn exe() -> String {
 /// Quotes a word for a shell command line only when it needs it.
 pub fn shell_word(s: &str) -> String {
     let plain = !s.is_empty()
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:@%+=,".contains(c));
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:@%+=,".contains(c));
     if plain {
         s.to_string()
     } else {
@@ -74,14 +80,18 @@ pub fn shell_word(s: &str) -> String {
 pub fn which(prog: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let executable = |p: &Path| {
-        p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+        p.metadata()
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
     };
     if prog.contains('/') {
         let p = PathBuf::from(prog);
         return executable(&p).then_some(p);
     }
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(prog)).find(|p| executable(p))
+    std::env::split_paths(&path)
+        .map(|d| d.join(prog))
+        .find(|p| executable(p))
 }
 
 /// Runs a command to completion with a timeout, capturing stdout and stderr.
@@ -145,11 +155,21 @@ pub fn run_json(prog: &str, args: &[&str]) -> Res<Option<serde_json::Value>> {
     let out = capture(prog, args, Duration::from_secs(60))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let msg = if err.is_empty() { String::from_utf8_lossy(&out.stdout).trim().to_string() } else { err };
-        return Err(format!("{line} failed (exit {}): {msg}", out.status.code().unwrap_or(-1)));
+        let msg = if err.is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            err
+        };
+        return Err(format!(
+            "{line} failed (exit {}): {msg}",
+            out.status.code().unwrap_or(-1)
+        ));
     }
     serde_json::from_slice(&out.stdout).map(Some).map_err(|_| {
-        format!("{line} did not print JSON: {}", truncate(&String::from_utf8_lossy(&out.stdout), 300))
+        format!(
+            "{line} did not print JSON: {}",
+            truncate(&String::from_utf8_lossy(&out.stdout), 300)
+        )
     })
 }
 

@@ -42,8 +42,12 @@ fn stub(dir: &Path, name: &str, body: &str) {
 
 impl Env {
     fn new(name: &str) -> Env {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let tmp = std::env::temp_dir().join(format!("peers-test-{name}-{}-{nanos}", std::process::id()));
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp =
+            std::env::temp_dir().join(format!("peers-test-{name}-{}-{nanos}", std::process::id()));
         fs::create_dir_all(tmp.join("bin")).unwrap();
         fs::create_dir_all(tmp.join("home")).unwrap();
         let tmp = fs::canonicalize(&tmp).unwrap();
@@ -125,13 +129,26 @@ echo '{"type":"agent_end"}'"#,
                 )
             })
             .collect();
-        fs::write(self.home().join("claude-agents.json"), format!("[{}]", rows.join(","))).unwrap();
+        fs::write(
+            self.home().join("claude-agents.json"),
+            format!("[{}]", rows.join(",")),
+        )
+        .unwrap();
     }
 
-    fn command(&self, me: Option<&str>, cwd: &Path, extra: &[(&str, &str)], args: &[&str]) -> Command {
+    fn command(
+        &self,
+        me: Option<&str>,
+        cwd: &Path,
+        extra: &[(&str, &str)],
+        args: &[&str],
+    ) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_peers"));
         cmd.env_clear()
-            .env("PATH", format!("{}:/usr/bin:/bin", self.tmp.join("bin").display()))
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.tmp.join("bin").display()),
+            )
             .env("HOME", self.home())
             .env("PEERS_CACHE", self.tmp.join("cache"))
             .env("AGY_HOME", self.tmp.join("agy"))
@@ -146,9 +163,18 @@ echo '{"type":"agent_end"}'"#,
         cmd
     }
 
-    fn run_env(&self, me: Option<&str>, cwd: &Path, extra: &[(&str, &str)], args: &[&str], stdin: Option<&str>) -> Out {
+    fn run_env(
+        &self,
+        me: Option<&str>,
+        cwd: &Path,
+        extra: &[(&str, &str)],
+        args: &[&str],
+        stdin: Option<&str>,
+    ) -> Out {
         let mut cmd = self.command(me, cwd, extra, args);
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut child = cmd.spawn().unwrap();
         {
             let mut input = child.stdin.take().unwrap();
@@ -175,12 +201,21 @@ echo '{"type":"agent_end"}'"#,
     }
 
     fn send(&self, me: &str, cwd: &Path, to: &str, seq: &str, body: &str) -> String {
-        self.ok(me, cwd, &["send", to, "--kind", "notice", "--seq", seq, "--body", body])
+        self.ok(
+            me,
+            cwd,
+            &["send", to, "--kind", "notice", "--seq", seq, "--body", body],
+        )
     }
 
     /// Starts `peers watch` for `me` and returns the first `n` lines it prints.
     fn watch_lines(&self, me: &str, cwd: &Path, n: usize) -> Vec<String> {
-        let mut child = self.command(Some(me), cwd, &[], &["watch"]).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        let mut child = self
+            .command(Some(me), cwd, &[], &["watch"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
         let lines = read_lines(&mut child, n, Duration::from_secs(10));
         let _ = child.kill();
         let _ = child.wait();
@@ -222,7 +257,10 @@ fn read_lines(child: &mut Child, n: usize, timeout: Duration) -> Vec<String> {
 fn wait_for(what: &str, secs: u64, mut cond: impl FnMut() -> bool) {
     let start = Instant::now();
     while !cond() {
-        assert!(start.elapsed() < Duration::from_secs(secs), "timed out waiting for {what}");
+        assert!(
+            start.elapsed() < Duration::from_secs(secs),
+            "timed out waiting for {what}"
+        );
         thread::sleep(Duration::from_millis(100));
     }
 }
@@ -232,7 +270,10 @@ fn has(hay: &str, needle: &str) {
 }
 
 fn lacks(hay: &str, needle: &str) {
-    assert!(!hay.contains(needle), "did not expect {needle:?} in:\n{hay}");
+    assert!(
+        !hay.contains(needle),
+        "did not expect {needle:?} in:\n{hay}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -243,11 +284,53 @@ fn lacks(hay: &str, needle: &str) {
 fn whoami_reads_each_runtime() {
     let e = Env::new("whoami");
     let d = e.dir("w");
-    has(&e.run_env(None, &d, &[], &["whoami"], None).err, "cannot tell which session");
-    has(&e.run_env(None, &d, &[("OPENCODE_SESSION_ID", "ses_me")], &["whoami"], None).out, "opencode:ses_me");
-    has(&e.run_env(None, &d, &[("CLAUDE_CODE_SESSION_ID", "abc")], &["whoami"], None).out, "claude:abc");
-    has(&e.run_env(None, &d, &[("ANTIGRAVITY_CONVERSATION_ID", "conv1")], &["whoami"], None).out, "antigravity:conv1");
-    let o = e.run_env(None, &d, &[("PEERS_SELF", "opencode:ses_x"), ("CLAUDE_CODE_SESSION_ID", "abc")], &["whoami"], None);
+    has(
+        &e.run_env(None, &d, &[], &["whoami"], None).err,
+        "cannot tell which session",
+    );
+    has(
+        &e.run_env(
+            None,
+            &d,
+            &[("OPENCODE_SESSION_ID", "ses_me")],
+            &["whoami"],
+            None,
+        )
+        .out,
+        "opencode:ses_me",
+    );
+    has(
+        &e.run_env(
+            None,
+            &d,
+            &[("CLAUDE_CODE_SESSION_ID", "abc")],
+            &["whoami"],
+            None,
+        )
+        .out,
+        "claude:abc",
+    );
+    has(
+        &e.run_env(
+            None,
+            &d,
+            &[("ANTIGRAVITY_CONVERSATION_ID", "conv1")],
+            &["whoami"],
+            None,
+        )
+        .out,
+        "antigravity:conv1",
+    );
+    let o = e.run_env(
+        None,
+        &d,
+        &[
+            ("PEERS_SELF", "opencode:ses_x"),
+            ("CLAUDE_CODE_SESSION_ID", "abc"),
+        ],
+        &["whoami"],
+        None,
+    );
     has(&o.out, "opencode:ses_x");
 }
 
@@ -256,15 +339,85 @@ fn send_rejects_bad_input() {
     let e = Env::new("validate");
     let d = e.dir("w");
     let send = |args: &[&str]| e.run(A, &d, &[&["send"], args].concat()).all();
-    has(&send(&["foo", "--kind", "ack", "--seq", "1", "--body", "x"]), "bad address");
-    has(&send(&["opencode:abc", "--kind", "ack", "--seq", "1", "--body", "x"]), "must start with 'ses'");
-    has(&send(&["opencode:ses_abc", "--kind", "nope", "--seq", "1", "--body", "x"]), "invalid value 'nope'");
-    has(&send(&["opencode:ses_abc", "--kind", "ack", "--seq", "1", "--body", " "]), "empty message body");
-    has(&send(&[A, "--kind", "ack", "--seq", "1", "--body", "x"]), "to yourself");
-    has(&send(&["opencode:ses_abc", "--kind", "ack", "--seq", "1", "--delivery", "queue", "--body", "x"]), "unexpected argument '--delivery'");
-    has(&send(&["opencode:ses_abc", "--kind", "request", "--seq", "1", "--reply-to", "nope", "--body", "x"]), "bad address");
-    has(&send(&["opencode:ses_abc", "--kind", "ack", "--seq", "1", "hello there"]), "the body goes in --body TEXT or on stdin");
-    has(&send(&["opencode:ses_abc", "hello there"]), "(--body <TEXT> | <body on stdin>)");
+    has(
+        &send(&["foo", "--kind", "ack", "--seq", "1", "--body", "x"]),
+        "bad address",
+    );
+    has(
+        &send(&["opencode:abc", "--kind", "ack", "--seq", "1", "--body", "x"]),
+        "must start with 'ses'",
+    );
+    has(
+        &send(&[
+            "opencode:ses_abc",
+            "--kind",
+            "nope",
+            "--seq",
+            "1",
+            "--body",
+            "x",
+        ]),
+        "invalid value 'nope'",
+    );
+    has(
+        &send(&[
+            "opencode:ses_abc",
+            "--kind",
+            "ack",
+            "--seq",
+            "1",
+            "--body",
+            " ",
+        ]),
+        "empty message body",
+    );
+    has(
+        &send(&[A, "--kind", "ack", "--seq", "1", "--body", "x"]),
+        "to yourself",
+    );
+    has(
+        &send(&[
+            "opencode:ses_abc",
+            "--kind",
+            "ack",
+            "--seq",
+            "1",
+            "--delivery",
+            "queue",
+            "--body",
+            "x",
+        ]),
+        "unexpected argument '--delivery'",
+    );
+    has(
+        &send(&[
+            "opencode:ses_abc",
+            "--kind",
+            "request",
+            "--seq",
+            "1",
+            "--reply-to",
+            "nope",
+            "--body",
+            "x",
+        ]),
+        "bad address",
+    );
+    has(
+        &send(&[
+            "opencode:ses_abc",
+            "--kind",
+            "ack",
+            "--seq",
+            "1",
+            "hello there",
+        ]),
+        "the body goes in --body TEXT or on stdin",
+    );
+    has(
+        &send(&["opencode:ses_abc", "hello there"]),
+        "(--body <TEXT> | <body on stdin>)",
+    );
     let o = e.run(A, &d, &["open", B, "--page", "0"]);
     assert_eq!(o.code, 2);
 }
@@ -279,8 +432,30 @@ fn receiver_gets_only_a_notification_and_reads_the_chat() {
     let d = e.dir("w");
     e.set_claude_live(&[(B, &d)]);
     e.ok(B, &d, &["chats"]); // B registers its profile
-    let sent = e.ok(A, &d, &["send", B, "--kind", "request", "--seq", "1", "--role", "lead", "--name", "Lena", "--body", "Review api/."]);
-    has(&sent, &format!("SENT {B}: stored in its inbox (1 unread message); notified via notification queue"));
+    let sent = e.ok(
+        A,
+        &d,
+        &[
+            "send",
+            B,
+            "--kind",
+            "request",
+            "--seq",
+            "1",
+            "--role",
+            "lead",
+            "--name",
+            "Lena",
+            "--body",
+            "Review api/.",
+        ],
+    );
+    has(
+        &sent,
+        &format!(
+            "SENT {B}: stored in its inbox (1 unread message); notified via notification queue"
+        ),
+    );
     e.send(A, &d, B, "2", "Second note.");
     let lines = e.watch_lines(B, &d, 2);
     assert_eq!(lines.len(), 2, "expected two notifications, got {lines:?}");
@@ -292,10 +467,16 @@ fn receiver_gets_only_a_notification_and_reads_the_chat() {
 
     let chats = e.ok(B, &d, &["chats"]);
     has(&chats, "2 unread messages in 1 chat");
-    has(&chats, &format!("{A}  name=\"Lena\"  role=lead  unread=2  messages=2"));
+    has(
+        &chats,
+        &format!("{A}  name=\"Lena\"  role=lead  unread=2  messages=2"),
+    );
     has(&chats, "from them [notice seq 2]: Second note.");
     // The sender's chat list says whether its last message was read.
-    has(&e.ok(A, &d, &["chats"]), "from you [notice seq 2, not read yet]: Second note.");
+    has(
+        &e.ok(A, &d, &["chats"]),
+        "from you [notice seq 2, not read yet]: Second note.",
+    );
     let page = e.ok(B, &d, &["open", A]);
     has(&page, "page 1 of 1  (messages 1-2 of 2");
     // The chat reads like a messenger, told from the reader's side.
@@ -333,7 +514,10 @@ fn unread_count_spans_the_whole_inbox() {
     let sent = e.send(C, &d, B, "1", "from c");
     has(&sent, "(2 unread messages)");
     let lines = e.watch_lines(B, &d, 2);
-    has(lines.get(1).map(String::as_str).unwrap_or(""), "You have 2 unread messages in your inbox.");
+    has(
+        lines.get(1).map(String::as_str).unwrap_or(""),
+        "You have 2 unread messages in your inbox.",
+    );
     has(&e.ok(B, &d, &["inbox"]), "2 unread messages in 2 chats");
 }
 
@@ -351,8 +535,14 @@ fn chat_history_pages_by_twenty_newest_first() {
     has(&p1, "message 26\n");
     has(&p1, "message 45\n");
     lacks(&p1, "message 25\n");
-    assert!(p1.find("message 26\n").unwrap() < p1.find("message 45\n").unwrap(), "oldest first within a page");
-    has(&p1, &format!("OLDER: peers open {A} --page 2  (25 unread messages on older pages)"));
+    assert!(
+        p1.find("message 26\n").unwrap() < p1.find("message 45\n").unwrap(),
+        "oldest first within a page"
+    );
+    has(
+        &p1,
+        &format!("OLDER: peers open {A} --page 2  (25 unread messages on older pages)"),
+    );
     has(&p1, "INBOX: 25 unread messages left");
     let p3 = e.ok(B, &d, &["open", A, "--page", "3"]);
     has(&p3, "page 3 of 3  (messages 1-5 of 45");
@@ -375,7 +565,10 @@ fn delete_hides_the_chat_only_for_the_deleter() {
     e.ok(B, &d, &["chats"]);
     e.send(A, &d, B, "1", "old one");
     e.send(A, &d, B, "2", "old two");
-    has(&e.ok(B, &d, &["delete", A]), &format!("DELETED your view of the chat with {A}: 2 messages hidden from you"));
+    has(
+        &e.ok(B, &d, &["delete", A]),
+        &format!("DELETED your view of the chat with {A}: 2 messages hidden from you"),
+    );
     has(&e.ok(B, &d, &["chats"]), "0 unread messages in 0 chats");
     has(&e.ok(B, &d, &["open", A]), "No chat with");
     has(&e.ok(B, &d, &["delete", A]), "nothing deleted");
@@ -396,15 +589,102 @@ fn delete_hides_the_chat_only_for_the_deleter() {
 #[test]
 fn contacts_list_every_profile_but_yours() {
     let e = Env::new("contacts");
-    let d = e.dir("w");
-    has(&e.ok(A, &d, &["contacts"]), "No contacts yet");
+    let ws = e.dir("ws");
+    fs::write(ws.join("roster.json"), "{}").unwrap();
+    let d = e.dir("ws/m");
+    // A reads from its own directory in the squad, so it does not take the member's role.
+    let mine = e.dir("ws/lead");
+    has(&e.ok(A, &mine, &["contacts"]), "No contacts yet");
     e.ok(B, &d, &["whoami"]);
-    fs::write(d.join(".peers.json"), r#"{"role": "backend", "display_name": "Rina (backend)"}"#).unwrap();
+    fs::write(
+        d.join(".peers.json"),
+        r#"{"role": "backend", "display_name": "Rina (backend)"}"#,
+    )
+    .unwrap();
     e.ok(C, &d, &["whoami"]);
-    let list = e.ok(A, &d, &["contacts"]);
-    has(&list, &format!("{C}  name=\"Rina (backend)\"  role=backend  runtime=claude  cwd={}", d.display()));
-    has(&list, &format!("{B}  name=\"\"  role=unassigned"));
+    let list = e.ok(A, &mine, &["contacts"]);
+    has(
+        &list,
+        &format!(
+            "{C}  status=offline  name=\"Rina (backend)\"  role=backend  runtime=claude  cwd={}",
+            d.display()
+        ),
+    );
+    has(
+        &list,
+        &format!("{B}  status=offline  name=\"\"  role=unassigned"),
+    );
     lacks(&list, &format!("{A} "));
+}
+
+#[test]
+fn contacts_show_which_sessions_are_live_and_which_were_replaced() {
+    let e = Env::new("contacts-status");
+    let ws = e.dir("ws");
+    fs::write(ws.join("roster.json"), "{}").unwrap();
+    let d = e.dir("ws/qa");
+    let mine = e.dir("ws/lead");
+    fs::write(
+        d.join(".peers.json"),
+        r#"{"role": "qa", "display_name": "Sari"}"#,
+    )
+    .unwrap();
+    // B was the qa member; after it hit a limit, C took over the role. B no longer runs.
+    e.ok(B, &d, &["whoami"]);
+    std::thread::sleep(Duration::from_millis(5));
+    e.ok(C, &d, &["whoami"]);
+    e.set_claude_live(&[(C, &d)]);
+    let list = e.ok(A, &mine, &["contacts"]);
+    has(&list, &format!("{C}  status=live  name=\"Sari\"  role=qa"));
+    has(
+        &list,
+        &format!("{B}  status=replaced  by={C}  name=\"Sari\"  role=qa"),
+    );
+    assert!(
+        list.find(C).unwrap() < list.find(B).unwrap(),
+        "live first:\n{list}"
+    );
+    // Messaging the replaced session names the one that took over.
+    let sent = e.ok(
+        A,
+        &mine,
+        &[
+            "send", B, "--kind", "request", "--seq", "1", "--body", "check it",
+        ],
+    );
+    has(&sent, "queued, not delivered yet");
+    has(
+        &sent,
+        &format!("REPLACED: {B} no longer runs, and {C} holds its role (qa) now"),
+    );
+    // Nothing runs: the newest of a role is offline, not replaced; the older one is replaced by it.
+    e.set_claude_live(&[]);
+    let list = e.ok(A, &mine, &["contacts"]);
+    has(&list, &format!("{C}  status=offline"));
+    has(&list, &format!("{B}  status=replaced  by={C}"));
+    lacks(
+        &e.ok(
+            A,
+            &mine,
+            &["send", C, "--kind", "notice", "--seq", "2", "--body", "hi"],
+        ),
+        "REPLACED",
+    );
+    // C reads B's old inbox as B (PEERS_SELF=B from inside C): that must not make B look newer.
+    std::thread::sleep(Duration::from_millis(5));
+    let c_id = C.trim_start_matches("claude:");
+    let o = e.run_env(
+        Some(B),
+        &d,
+        &[("CLAUDE_CODE_SESSION_ID", c_id)],
+        &["chats"],
+        None,
+    );
+    assert_eq!(o.code, 0, "{}", o.all());
+    has(
+        &e.ok(A, &mine, &["contacts"]),
+        &format!("{B}  status=replaced  by={C}"),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -422,11 +702,29 @@ fn squad_members_in_their_own_directories_share_one_database() {
     e.ok(B, &backend, &["chats"]);
     let sent = e.send(A, &lead, B, "1", "hello squad");
     lacks(&sent, "--squad");
-    has(&e.watch_line(B, &backend), &format!("Read it with: peers open {A}"));
+    has(
+        &e.watch_line(B, &backend),
+        &format!("Read it with: peers open {A}"),
+    );
     has(&e.ok(B, &backend, &["open", A]), "hello squad");
-    let db = e.tmp.join("cache").join(ws.display().to_string().replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-")).join("bd.sql");
-    assert!(db.is_file(), "expected the squad database at {}", db.display());
-    assert!(fs::read_dir(e.tmp.join("cache")).unwrap().count() == 1, "only the squad database exists");
+    let db = e
+        .tmp
+        .join("cache")
+        .join(
+            ws.display()
+                .to_string()
+                .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-"),
+        )
+        .join("bd.sql");
+    assert!(
+        db.is_file(),
+        "expected the squad database at {}",
+        db.display()
+    );
+    assert!(
+        fs::read_dir(e.tmp.join("cache")).unwrap().count() == 1,
+        "only the squad database exists"
+    );
 }
 
 #[test]
@@ -440,13 +738,52 @@ fn outsider_talks_to_a_squad_through_the_squad_database() {
     e.ok(B, &lead, &["whoami"]);
     // The outsider C picks the squad's database with --squad.
     let ws_s = ws.display().to_string();
-    let sent = e.ok(C, &mine, &["--squad", &ws_s, "send", B, "--kind", "request", "--seq", "1", "--role", "user", "--body", "Build it."]);
-    has(&sent, &format!("the answer then with `peers open {B} --squad {ws_s}`"));
-    has(&e.watch_line(B, &lead), &format!("Read it with: peers open {C}\n"));
+    let sent = e.ok(
+        C,
+        &mine,
+        &[
+            "--squad",
+            &ws_s,
+            "send",
+            B,
+            "--kind",
+            "request",
+            "--seq",
+            "1",
+            "--role",
+            "user",
+            "--body",
+            "Build it.",
+        ],
+    );
+    has(
+        &sent,
+        &format!("the answer then with `peers open {B} --squad {ws_s}`"),
+    );
+    has(
+        &e.watch_line(B, &lead),
+        &format!("Read it with: peers open {C}\n"),
+    );
     has(&e.ok(B, &lead, &["open", C]), "Build it.");
     // The lead's answer lands in the squad database; C's notification names it.
-    e.ok(B, &lead, &["send", C, "--kind", "completion", "--seq", "1", "--body", "Built."]);
-    has(&e.watch_line(C, &mine), &format!("Read it with: peers open {B} --squad {ws_s}"));
+    e.ok(
+        B,
+        &lead,
+        &[
+            "send",
+            C,
+            "--kind",
+            "completion",
+            "--seq",
+            "1",
+            "--body",
+            "Built.",
+        ],
+    );
+    has(
+        &e.watch_line(C, &mine),
+        &format!("Read it with: peers open {B} --squad {ws_s}"),
+    );
     has(&e.ok(C, &mine, &["open", B, "--squad", &ws_s]), "Built.");
     // C's own directory holds no squad chat.
     has(&e.ok(C, &mine, &["chats"]), "0 chats");
@@ -462,12 +799,31 @@ fn opencode_target_is_steered_the_notification() {
     let d = e.dir("w");
     fs::write(
         e.home().join("opencode-sessions.json"),
-        format!(r#"{{"data":[{{"id":"ses_abc","title":"t","location":{{"directory":"{}"}}}}]}}"#, d.display()),
+        format!(
+            r#"{{"data":[{{"id":"ses_abc","title":"t","location":{{"directory":"{}"}}}}]}}"#,
+            d.display()
+        ),
     )
     .unwrap();
-    let sent = e.ok(A, &d, &["send", "opencode:ses_abc", "--kind", "request", "--seq", "1", "--body", "secret body"]);
+    let sent = e.ok(
+        A,
+        &d,
+        &[
+            "send",
+            "opencode:ses_abc",
+            "--kind",
+            "request",
+            "--seq",
+            "1",
+            "--body",
+            "secret body",
+        ],
+    );
     // Neither running nor open in a TUI: admitted to its inbox, no run.
-    has(&sent, "queued, not delivered yet: opencode:ses_abc is neither running nor open in a TUI");
+    has(
+        &sent,
+        "queued, not delivered yet: opencode:ses_abc is neither running nor open in a TUI",
+    );
     has(&sent, "No headless run was started");
     let prompt = fs::read_to_string(e.home().join("opencode-prompt")).unwrap();
     has(&prompt, r#""delivery":"steer""#);
@@ -476,18 +832,65 @@ fn opencode_target_is_steered_the_notification() {
     lacks(&prompt, "secret body");
     has(&e.ok("opencode:ses_abc", &d, &["open", A]), "secret body");
     // --headless resumes it in the service.
-    let sent = e.ok(A, &d, &["send", "opencode:ses_abc", "--kind", "notice", "--seq", "2", "--body", "x", "--headless"]);
-    has(&sent, "notified via headless resume in the OpenCode service (message=msg_1)");
-    has(&fs::read_to_string(e.home().join("opencode-prompt")).unwrap(), r#""resume":true"#);
+    let sent = e.ok(
+        A,
+        &d,
+        &[
+            "send",
+            "opencode:ses_abc",
+            "--kind",
+            "notice",
+            "--seq",
+            "2",
+            "--body",
+            "x",
+            "--headless",
+        ],
+    );
+    has(
+        &sent,
+        "notified via headless resume in the OpenCode service (message=msg_1)",
+    );
+    has(
+        &fs::read_to_string(e.home().join("opencode-prompt")).unwrap(),
+        r#""resume":true"#,
+    );
     // A session open in a TUI (a process opened with its id) is steered with a turn.
-    stub(&e.tmp.join("bin"), "ps", r#"[ "$*" = "-ax -o args=" ] && { echo "/opt/homebrew/bin/opencode -s ses_abc"; exit 0; }
-exec /bin/ps "$@""#);
-    let sent = e.ok(A, &d, &["send", "opencode:ses_abc", "--kind", "notice", "--seq", "3", "--body", "y"]);
-    has(&sent, "notified by steering into the session open in its TUI");
-    has(&fs::read_to_string(e.home().join("opencode-prompt")).unwrap(), r#""resume":true"#);
+    stub(
+        &e.tmp.join("bin"),
+        "ps",
+        r#"[ "$*" = "-ax -o args=" ] && { echo "/opt/homebrew/bin/opencode -s ses_abc"; exit 0; }
+exec /bin/ps "$@""#,
+    );
+    let sent = e.ok(
+        A,
+        &d,
+        &[
+            "send",
+            "opencode:ses_abc",
+            "--kind",
+            "notice",
+            "--seq",
+            "3",
+            "--body",
+            "y",
+        ],
+    );
+    has(
+        &sent,
+        "notified by steering into the session open in its TUI",
+    );
+    has(
+        &fs::read_to_string(e.home().join("opencode-prompt")).unwrap(),
+        r#""resume":true"#,
+    );
     // A TUI in herdr without the id in its arguments: found by its directory, for the newest session there.
-    stub(&e.tmp.join("bin"), "ps", r#"[ "$*" = "-ax -o args=" ] && { echo "opencode --prompt hi"; exit 0; }
-exec /bin/ps "$@""#);
+    stub(
+        &e.tmp.join("bin"),
+        "ps",
+        r#"[ "$*" = "-ax -o args=" ] && { echo "opencode --prompt hi"; exit 0; }
+exec /bin/ps "$@""#,
+    );
     stub(
         &e.tmp.join("bin"),
         "herdr",
@@ -508,16 +911,35 @@ esac"#,
         )
     };
     fs::write(e.home().join("opencode-sessions.json"), sessions("ses_abc")).unwrap();
-    has(&e.send(A, &d, "opencode:ses_abc", "4", "z"), "notified by steering into the session open in its TUI");
+    has(
+        &e.send(A, &d, "opencode:ses_abc", "4", "z"),
+        "notified by steering into the session open in its TUI",
+    );
     fs::write(e.home().join("opencode-sessions.json"), sessions("ses_old")).unwrap();
-    has(&e.send(A, &d, "opencode:ses_abc", "5", "z"), "queued, not delivered yet");
+    has(
+        &e.send(A, &d, "opencode:ses_abc", "5", "z"),
+        "queued, not delivered yet",
+    );
 }
 
 #[test]
 fn unknown_target_directory_names_the_squad_in_the_notification() {
     let e = Env::new("unknown");
     let d = e.dir("w");
-    e.ok(A, &d, &["send", "opencode:ses_abc", "--kind", "notice", "--seq", "1", "--body", "x"]);
+    e.ok(
+        A,
+        &d,
+        &[
+            "send",
+            "opencode:ses_abc",
+            "--kind",
+            "notice",
+            "--seq",
+            "1",
+            "--body",
+            "x",
+        ],
+    );
     let prompt = fs::read_to_string(e.home().join("opencode-prompt")).unwrap();
     has(&prompt, &format!("peers open {A} --squad {}", d.display()));
 }
@@ -527,13 +949,32 @@ fn reply_hints_tell_the_sender_to_end_its_turn() {
     let e = Env::new("hints");
     let d = e.dir("w");
     let send = |me: &str, extra: &[&str]| {
-        let args = [&["send", "opencode:ses_abc", "--seq", "1", "--body", "hi"][..], extra].concat();
+        let args = [
+            &["send", "opencode:ses_abc", "--seq", "1", "--body", "hi"][..],
+            extra,
+        ]
+        .concat();
         e.ok(me, &d, &args)
     };
-    has(&send("opencode:ses_me", &["--kind", "request"]), "steered into this session as a new user turn");
-    has(&send("antigravity:66666666-6666-6666-6666-666666666666", &["--kind", "request"]), "Do not sleep, poll");
-    has(&send(A, &["--kind", "request"]), "Arm one Monitor watch on `peers watch`");
-    has(&send(A, &["--kind", "request", "--reply-to", "opencode:ses_boss"]), "goes to opencode:ses_boss, not to you");
+    has(
+        &send("opencode:ses_me", &["--kind", "request"]),
+        "steered into this session as a new user turn",
+    );
+    has(
+        &send(
+            "antigravity:66666666-6666-6666-6666-666666666666",
+            &["--kind", "request"],
+        ),
+        "Do not sleep, poll",
+    );
+    has(
+        &send(A, &["--kind", "request"]),
+        "Arm one Monitor watch on `peers watch`",
+    );
+    has(
+        &send(A, &["--kind", "request", "--reply-to", "opencode:ses_boss"]),
+        "goes to opencode:ses_boss, not to you",
+    );
     lacks(&send(A, &["--kind", "ack"]), "REPLY:");
 }
 
@@ -544,47 +985,147 @@ fn stopped_claude_target_is_resumed_headless_with_the_notification() {
     e.set_claude_live(&[]);
     e.ok(STOPPED, &d, &["whoami"]);
     let queued = e.send(A, &d, STOPPED, "1", "wake up");
-    has(&queued, &format!("queued, not delivered yet: {STOPPED} is not running"));
-    assert!(!e.home().join("claude-args").exists(), "a stopped claude ran without --headless");
+    has(
+        &queued,
+        &format!("queued, not delivered yet: {STOPPED} is not running"),
+    );
+    assert!(
+        !e.home().join("claude-args").exists(),
+        "a stopped claude ran without --headless"
+    );
     // The queued notification reaches it when it next starts with a watch.
     has(&e.watch_line(STOPPED, &d), "You have 1 unread message");
-    let sent = e.ok(A, &d, &["send", STOPPED, "--kind", "notice", "--seq", "1", "--body", "wake up", "--headless"]);
+    let sent = e.ok(
+        A,
+        &d,
+        &[
+            "send",
+            STOPPED,
+            "--kind",
+            "notice",
+            "--seq",
+            "1",
+            "--body",
+            "wake up",
+            "--headless",
+        ],
+    );
     has(&sent, "notified via headless resume pid=");
-    wait_for("the headless claude run", 10, || e.home().join("claude-stdin").is_file() && e.home().join("claude-args").is_file());
+    wait_for("the headless claude run", 10, || {
+        e.home().join("claude-stdin").is_file() && e.home().join("claude-args").is_file()
+    });
     let args = fs::read_to_string(e.home().join("claude-args")).unwrap();
     has(&args, "--resume\n99999999-9999-9999-9999-999999999999\n");
     has(&args, "--dangerously-skip-permissions");
-    wait_for("the notification on stdin", 10, || fs::read_to_string(e.home().join("claude-stdin")).unwrap().contains("Read it with"));
-    lacks(&fs::read_to_string(e.home().join("claude-stdin")).unwrap(), "wake up");
+    wait_for("the notification on stdin", 10, || {
+        fs::read_to_string(e.home().join("claude-stdin"))
+            .unwrap()
+            .contains("Read it with")
+    });
+    lacks(
+        &fs::read_to_string(e.home().join("claude-stdin")).unwrap(),
+        "wake up",
+    );
 }
 
 #[test]
 fn antigravity_headless_runs_one_at_a_time_in_order() {
     let e = Env::new("agy");
     let d = e.dir("w");
-    let queued = e.ok(A, &d, &["send", AGY, "--kind", "notice", "--seq", "3", "--body", "not yet"]);
-    has(&queued, &format!("queued, not delivered yet: {AGY} is not open in an agy TUI"));
-    assert!(!e.home().join("agy-args").exists(), "agy ran without --headless");
-    let sent = e.ok(A, &d, &["send", AGY, "--kind", "request", "--seq", "4", "--reply-to", "opencode:ses_boss", "--body", "relay me", "--headless"]);
+    let queued = e.ok(
+        A,
+        &d,
+        &[
+            "send", AGY, "--kind", "notice", "--seq", "3", "--body", "not yet",
+        ],
+    );
+    has(
+        &queued,
+        &format!("queued, not delivered yet: {AGY} is not open in an agy TUI"),
+    );
+    assert!(
+        !e.home().join("agy-args").exists(),
+        "agy ran without --headless"
+    );
+    let sent = e.ok(
+        A,
+        &d,
+        &[
+            "send",
+            AGY,
+            "--kind",
+            "request",
+            "--seq",
+            "4",
+            "--reply-to",
+            "opencode:ses_boss",
+            "--body",
+            "relay me",
+            "--headless",
+        ],
+    );
     has(&sent, &format!("SENT {AGY}: stored in its inbox (2 unread messages); notified via headless resume (queued"));
     // The chat names where the answer goes.
-    has(&e.ok(A, &d, &["open", AGY]), "  request seq 4 · answer goes to opencode:ses_boss · not read yet\n  relay me\n");
-    wait_for("the first agy run", 20, || fs::read_to_string(e.home().join("agy-timeline")).unwrap_or_default().contains("end"));
+    has(
+        &e.ok(A, &d, &["open", AGY]),
+        "  request seq 4 · answer goes to opencode:ses_boss · not read yet\n  relay me\n",
+    );
+    wait_for("the first agy run", 20, || {
+        fs::read_to_string(e.home().join("agy-timeline"))
+            .unwrap_or_default()
+            .contains("end")
+    });
     let args = fs::read_to_string(e.home().join("agy-args")).unwrap();
     has(&args, "--dangerously-skip-permissions");
     has(&args, "-p\nNew message from");
     fs::remove_file(e.home().join("agy-timeline")).unwrap();
     for n in 5..=7 {
-        e.ok(A, &d, &["send", AGY, "--kind", "notice", "--seq", &n.to_string(), "--body", &format!("n{n}"), "--headless"]);
+        e.ok(
+            A,
+            &d,
+            &[
+                "send",
+                AGY,
+                "--kind",
+                "notice",
+                "--seq",
+                &n.to_string(),
+                "--body",
+                &format!("n{n}"),
+                "--headless",
+            ],
+        );
     }
     wait_for("three agy runs", 30, || {
-        fs::read_to_string(e.home().join("agy-timeline")).unwrap_or_default().matches("end").count() == 3
+        fs::read_to_string(e.home().join("agy-timeline"))
+            .unwrap_or_default()
+            .matches("end")
+            .count()
+            == 3
     });
     let timeline = fs::read_to_string(e.home().join("agy-timeline")).unwrap();
     let order: Vec<&str> = timeline.lines().collect();
-    assert_eq!(order, ["start", "end", "start", "end", "start", "end"], "runs overlapped:\n{timeline}");
-    let queue = e.tmp.join("cache").read_dir().unwrap().next().unwrap().unwrap().path().join("queue/antigravity-33333333-3333-3333-3333-333333333333");
-    wait_for("an empty queue", 10, || fs::read_dir(&queue).unwrap().flatten().all(|f| !f.path().to_string_lossy().ends_with(".md")));
+    assert_eq!(
+        order,
+        ["start", "end", "start", "end", "start", "end"],
+        "runs overlapped:\n{timeline}"
+    );
+    let queue = e
+        .tmp
+        .join("cache")
+        .read_dir()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("queue/antigravity-33333333-3333-3333-3333-333333333333");
+    wait_for("an empty queue", 10, || {
+        fs::read_dir(&queue)
+            .unwrap()
+            .flatten()
+            .all(|f| !f.path().to_string_lossy().ends_with(".md"))
+    });
 }
 
 #[test]
@@ -595,8 +1136,12 @@ fn antigravity_tui_in_herdr_gets_the_notification_typed_in() {
     fs::write(agy.join("55555555-5555-5555-5555-555555555555.lock"), "").unwrap();
     let bin = e.tmp.join("bin");
     stub(&bin, "lsof", "echo 4242");
-    stub(&bin, "ps", r#"[ "$*" = "-o tty= -p 4242" ] && { cat "$HOME/tui-tty"; exit 0; }
-exec /bin/ps "$@""#);
+    stub(
+        &bin,
+        "ps",
+        r#"[ "$*" = "-o tty= -p 4242" ] && { cat "$HOME/tui-tty"; exit 0; }
+exec /bin/ps "$@""#,
+    );
     fs::write(e.home().join("tui-tty"), "ttys901").unwrap();
     stub(
         &bin,
@@ -612,19 +1157,47 @@ exec /bin/ps "$@""#);
 esac"#,
     );
     let t = "antigravity:55555555-5555-5555-5555-555555555555";
-    has(&e.send(A, &d, t, "11", "to herdr"), "herdr session main pane w1:p3");
-    has(&fs::read_to_string(e.home().join("herdr-prompt")).unwrap(), "You have 1 unread message");
+    has(
+        &e.send(A, &d, t, "11", "to herdr"),
+        "herdr session main pane w1:p3",
+    );
+    has(
+        &fs::read_to_string(e.home().join("herdr-prompt")).unwrap(),
+        "You have 1 unread message",
+    );
     fs::write(e.home().join("herdr-blocked"), "").unwrap();
-    let blocked = e.run(A, &d, &["send", t, "--kind", "notice", "--seq", "12", "--body", "x"]);
+    let blocked = e.run(
+        A,
+        &d,
+        &["send", t, "--kind", "notice", "--seq", "12", "--body", "x"],
+    );
     has(&blocked.err, "the message is stored");
     has(&blocked.err, "agent_blocked");
     // A TUI outside herdr: queued by default; --headless is refused before anything is stored.
-    stub(&bin, "herdr", r#"[ "$*" = "session list --json" ] && { echo '{"sessions":[]}'; exit 0; }
-echo "unexpected herdr call: $*" >&2; exit 9"#);
+    stub(
+        &bin,
+        "herdr",
+        r#"[ "$*" = "session list --json" ] && { echo '{"sessions":[]}'; exit 0; }
+echo "unexpected herdr call: $*" >&2; exit 9"#,
+    );
     let queued = e.send(A, &d, t, "8", "waits");
     has(&queued, "outside herdr, where peers cannot type");
     has(&queued, "queued, not delivered yet");
-    let refused = e.run(A, &d, &["send", t, "--kind", "notice", "--seq", "9", "--body", "never stored", "--headless"]);
+    let refused = e.run(
+        A,
+        &d,
+        &[
+            "send",
+            t,
+            "--kind",
+            "notice",
+            "--seq",
+            "9",
+            "--body",
+            "never stored",
+            "--headless",
+        ],
+    );
     has(&refused.err, "outside herdr");
     lacks(&e.ok(A, &d, &["open", t]), "never stored");
 }
@@ -638,24 +1211,58 @@ fn role_and_name_come_from_flags_env_and_peers_json() {
     let e = Env::new("roles");
     let d = e.dir("w");
     let member = e.dir("member/repo/src");
-    fs::write(e.tmp.join("member/.peers.json"), r#"{"role": "frontend", "squad": "s", "display_name": "Fia (frontend)"}"#).unwrap();
+    fs::write(
+        e.tmp.join("member/.peers.json"),
+        r#"{"role": "frontend", "squad": "s", "display_name": "Fia (frontend)"}"#,
+    )
+    .unwrap();
     e.set_claude_live(&[(B, &d)]);
     e.ok(B, &d, &["chats"]);
     e.send(A, &d, B, "1", "default");
-    e.ok(A, &d, &["send", B, "--kind", "notice", "--seq", "2", "--role", "lead", "--name", "Lena\n (lead)", "--body", "flags"]);
-    e.run_env(Some(A), &d, &[("PEERS_ROLE", "ops"), ("PEERS_NAME", "Oki")], &["send", B, "--kind", "notice", "--seq", "3", "--body", "env"], None);
+    e.ok(
+        A,
+        &d,
+        &[
+            "send",
+            B,
+            "--kind",
+            "notice",
+            "--seq",
+            "2",
+            "--role",
+            "lead",
+            "--name",
+            "Lena\n (lead)",
+            "--body",
+            "flags",
+        ],
+    );
+    e.run_env(
+        Some(A),
+        &d,
+        &[("PEERS_ROLE", "ops"), ("PEERS_NAME", "Oki")],
+        &["send", B, "--kind", "notice", "--seq", "3", "--body", "env"],
+        None,
+    );
     // A member's own directory holds its .peers.json; its session directory keys the database.
     let d_s = d.display().to_string();
     let in_member = |args: &[&str]| {
         let o = e.run_env(Some(A), &member, &[("PEERS_CWD", &d_s)], args, None);
         assert_eq!(o.code, 0, "{}", o.all());
     };
-    in_member(&["send", B, "--kind", "notice", "--seq", "4", "--body", "file"]);
-    in_member(&["send", B, "--kind", "notice", "--seq", "5", "--role", "user", "--body", "user"]);
+    in_member(&[
+        "send", B, "--kind", "notice", "--seq", "4", "--body", "file",
+    ]);
+    in_member(&[
+        "send", B, "--kind", "notice", "--seq", "5", "--role", "user", "--body", "user",
+    ]);
     // The notification names the sender with its role once, even when the name holds it.
     let lines = e.watch_lines(B, &d, 5);
     assert_eq!(lines.len(), 5, "expected five notifications, got {lines:?}");
-    has(&lines[0], &format!("New message from {A} (unassigned). You have"));
+    has(
+        &lines[0],
+        &format!("New message from {A} (unassigned). You have"),
+    );
     has(&lines[1], "New message from Lena (lead). You have");
     has(&lines[2], "New message from Oki (ops). You have");
     has(&lines[3], "New message from Fia (frontend). You have");
@@ -694,7 +1301,12 @@ fn channel_pushes_notifications_as_channel_turns() {
     let e = Env::new("channel");
     let d = e.dir("w");
     let me = "claude:44444444-4444-4444-4444-444444444444";
-    let mut child = e.command(Some(me), &d, &[], &["channel"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let mut child = e
+        .command(Some(me), &d, &[], &["channel"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let out = child.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel();
@@ -707,7 +1319,11 @@ fn channel_pushes_notifications_as_channel_turns() {
     let init = rx.recv_timeout(Duration::from_secs(10)).unwrap();
     has(&init, r#""claude/channel":{}"#);
     has(&init, "peers open");
-    writeln!(stdin, r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#).unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .unwrap();
     let mut sent = String::new();
     wait_for("the channel to listen", 15, || {
         sent = e.send("opencode:ses_sender", &d, me, "7", "ping");
@@ -721,7 +1337,10 @@ fn channel_pushes_notifications_as_channel_turns() {
     let _ = child.wait();
     // Once the channel has exited, the session no longer counts as listening.
     e.set_claude_live(&[(me, &d)]);
-    has(&e.send("opencode:ses_sender", &d, me, "8", "pong"), "via notification queue");
+    has(
+        &e.send("opencode:ses_sender", &d, me, "8", "pong"),
+        "via notification queue",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -737,14 +1356,33 @@ fn pi_session_is_found_listed_and_shown() {
     let who = e.run_env(None, &d, &[("PI_SESSION_ID", id)], &["whoami"], None);
     assert_eq!(who.out.trim(), PI, "{}", who.all());
     let list = e.ok(A, &d, &["list"]);
-    has(&list, &format!("{PI}  kind=session  status=saved  name=\"debater\""));
+    has(
+        &list,
+        &format!("{PI}  kind=session  status=saved  name=\"debater\""),
+    );
     let shown = e.ok(A, &d, &["show", PI]);
     has(&shown, "user: hello pi\nassistant: hi there\n");
     // The session's directory decides its squad, so a sender elsewhere names its own squad.
     let other = e.dir("elsewhere");
-    let sent = e.ok(A, &other, &["send", PI, "--kind", "notice", "--seq", "1", "--body", "hi", "--headless"]);
+    let sent = e.ok(
+        A,
+        &other,
+        &[
+            "send",
+            PI,
+            "--kind",
+            "notice",
+            "--seq",
+            "1",
+            "--body",
+            "hi",
+            "--headless",
+        ],
+    );
     has(&sent, "notified via headless resume");
-    wait_for("the headless pi run", 20, || e.home().join("pi-args").is_file());
+    wait_for("the headless pi run", 20, || {
+        e.home().join("pi-args").is_file()
+    });
 }
 
 #[test]
@@ -752,23 +1390,86 @@ fn pi_without_a_listener_runs_headless_one_at_a_time_in_order() {
     let e = Env::new("pi-headless");
     let d = e.dir("w");
     let file = e.save_pi_session(&d);
-    let queued = e.ok(A, &d, &["send", PI, "--kind", "notice", "--seq", "0", "--body", "not yet"]);
-    has(&queued, &format!("queued, not delivered yet: {PI} has no peers extension listening"));
-    let sent = e.ok(A, &d, &["send", PI, "--kind", "request", "--seq", "1", "--body", "debate me", "--headless"]);
+    let queued = e.ok(
+        A,
+        &d,
+        &[
+            "send", PI, "--kind", "notice", "--seq", "0", "--body", "not yet",
+        ],
+    );
+    has(
+        &queued,
+        &format!("queued, not delivered yet: {PI} has no peers extension listening"),
+    );
+    let sent = e.ok(
+        A,
+        &d,
+        &[
+            "send",
+            PI,
+            "--kind",
+            "request",
+            "--seq",
+            "1",
+            "--body",
+            "debate me",
+            "--headless",
+        ],
+    );
     has(&sent, &format!("SENT {PI}: stored in its inbox (2 unread messages); notified via headless resume (no peers extension"));
-    wait_for("the first pi run", 20, || fs::read_to_string(e.home().join("pi-timeline")).unwrap_or_default().contains("end"));
+    wait_for("the first pi run", 20, || {
+        fs::read_to_string(e.home().join("pi-timeline"))
+            .unwrap_or_default()
+            .contains("end")
+    });
     let args = fs::read_to_string(e.home().join("pi-args")).unwrap();
-    has(&args, &format!("--session\n{}\n--mode\njson\n--\nNew message from", file.display()));
+    has(
+        &args,
+        &format!(
+            "--session\n{}\n--mode\njson\n--\nNew message from",
+            file.display()
+        ),
+    );
     lacks(&args, "debate me");
-    assert_eq!(fs::read_to_string(e.home().join("pi-cwd")).unwrap().trim(), d.display().to_string());
-    has(&fs::read_to_string(e.home().join("pi-env")).unwrap(), "PEERS_PI_HEADLESS=1");
+    assert_eq!(
+        fs::read_to_string(e.home().join("pi-cwd")).unwrap().trim(),
+        d.display().to_string()
+    );
+    has(
+        &fs::read_to_string(e.home().join("pi-env")).unwrap(),
+        "PEERS_PI_HEADLESS=1",
+    );
     fs::remove_file(e.home().join("pi-timeline")).unwrap();
     for n in 2..=4 {
-        e.ok(A, &d, &["send", PI, "--kind", "notice", "--seq", &n.to_string(), "--body", &format!("n{n}"), "--headless"]);
+        e.ok(
+            A,
+            &d,
+            &[
+                "send",
+                PI,
+                "--kind",
+                "notice",
+                "--seq",
+                &n.to_string(),
+                "--body",
+                &format!("n{n}"),
+                "--headless",
+            ],
+        );
     }
-    wait_for("three pi runs", 30, || fs::read_to_string(e.home().join("pi-timeline")).unwrap_or_default().matches("end").count() == 3);
+    wait_for("three pi runs", 30, || {
+        fs::read_to_string(e.home().join("pi-timeline"))
+            .unwrap_or_default()
+            .matches("end")
+            .count()
+            == 3
+    });
     let timeline = fs::read_to_string(e.home().join("pi-timeline")).unwrap();
-    assert_eq!(timeline.lines().collect::<Vec<_>>(), ["start", "end", "start", "end", "start", "end"], "runs overlapped:\n{timeline}");
+    assert_eq!(
+        timeline.lines().collect::<Vec<_>>(),
+        ["start", "end", "start", "end", "start", "end"],
+        "runs overlapped:\n{timeline}"
+    );
 }
 
 #[test]
@@ -777,33 +1478,81 @@ fn pi_listener_gets_notifications_and_releases_on_stdin_close() {
     let d = e.dir("w");
     e.save_pi_session(&d);
     let mut child = e
-        .command(None, &d, &[], &["_pi-listen", PI, "--cwd", &d.display().to_string()])
+        .command(
+            None,
+            &d,
+            &[],
+            &["_pi-listen", PI, "--cwd", &d.display().to_string()],
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    wait_for("the listener to register", 10, || e.ok(A, &d, &["list"]).contains("status=listening"));
-    let sent = e.ok(A, &d, &["send", PI, "--kind", "request", "--seq", "1", "--body", "debate me"]);
+    wait_for("the listener to register", 10, || {
+        e.ok(A, &d, &["list"]).contains("status=listening")
+    });
+    let sent = e.ok(
+        A,
+        &d,
+        &[
+            "send",
+            PI,
+            "--kind",
+            "request",
+            "--seq",
+            "1",
+            "--body",
+            "debate me",
+        ],
+    );
     has(&sent, "notified via the peers pi extension");
     let lines = read_lines(&mut child, 1, Duration::from_secs(10));
     has(&lines.join(""), &format!("Read it with: peers open {A}"));
     // The pi session's own reply hint names the extension.
-    let reply = e.ok(PI, &d, &["send", A, "--kind", "completion", "--seq", "1", "--body", "done"]);
+    let reply = e.ok(
+        PI,
+        &d,
+        &[
+            "send",
+            A,
+            "--kind",
+            "completion",
+            "--seq",
+            "1",
+            "--body",
+            "done",
+        ],
+    );
     has(&reply, "through the peers extension");
     drop(child.stdin.take());
     let status = child.wait().unwrap();
     assert!(status.success());
     // Released: the next notification waits for the next listener, and it gets it on start.
-    has(&e.ok(A, &d, &["send", PI, "--kind", "notice", "--seq", "2", "--body", "x"]), "queued, not delivered yet");
+    has(
+        &e.ok(
+            A,
+            &d,
+            &["send", PI, "--kind", "notice", "--seq", "2", "--body", "x"],
+        ),
+        "queued, not delivered yet",
+    );
     let mut again = e
-        .command(None, &d, &[], &["_pi-listen", PI, "--cwd", &d.display().to_string()])
+        .command(
+            None,
+            &d,
+            &[],
+            &["_pi-listen", PI, "--cwd", &d.display().to_string()],
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    has(&read_lines(&mut again, 1, Duration::from_secs(10)).join(""), "Read it with");
+    has(
+        &read_lines(&mut again, 1, Duration::from_secs(10)).join(""),
+        "Read it with",
+    );
     drop(again.stdin.take());
     let _ = again.wait();
 }
@@ -823,7 +1572,10 @@ fn pi_extension_is_printed_and_rejects_other_runtimes() {
     let written = std::fs::metadata(&file).unwrap().modified().unwrap();
     std::thread::sleep(Duration::from_millis(20));
     assert_eq!(e.ok(A, &d, &["pi-extension", "--path"]), path);
-    assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), written);
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().modified().unwrap(),
+        written
+    );
     let o = e.run(A, &d, &["_pi-listen", A]);
     assert_eq!(o.code, 2);
     has(&o.all(), "serves pi sessions only");

@@ -45,7 +45,7 @@ The script needs `curl` and `tar`, and `cargo` only to build from source. It pri
 
 | Release | Binaries |
 | --- | --- |
-| `v0.0.1` | `aarch64-apple-darwin` (macOS on Apple silicon) |
+| `v0.0.1` and later | `aarch64-apple-darwin` (macOS on Apple silicon) |
 
 Each binary is `peers-<target>.tar.gz` on the release page, with its `.sha256` next to it. Other machines (Intel macOS, Linux on x86_64 or arm64) build from source through the install script. The Linux build is not tested yet.
 
@@ -99,7 +99,7 @@ mkdir -p ~/.pi/agent/extensions && peers pi-extension > ~/.pi/agent/extensions/p
 | `peers whoami` | Prints this session's address, such as `claude:<uuid>` or `opencode:ses_...`. |
 | `peers list [--all-dirs] [--all] [--children]` | Lists live and recent sessions of every runtime. |
 | `peers send <address> --kind <kind> --seq <n> --body TEXT` | Stores a message and notifies the receiver. The body may come on stdin instead of `--body`. |
-| `peers contacts` | Lists every peer profile in the squad's database. |
+| `peers contacts` | Lists every peer profile in the squad's database, with its status: `live`, `offline`, or `replaced` by the session that holds its role now. |
 | `peers chats` (or `peers inbox`) | Lists your chats with their unread counts, and whether the peer has read your last message. |
 | `peers open <address> [--page N]` | Prints one page of a chat: 20 messages, with page 1 the newest. It marks the messages it prints as read. |
 | `peers delete <address>` | Hides a chat from your own view. The other side keeps it. |

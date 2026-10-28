@@ -6,6 +6,7 @@ mod channel;
 mod cli;
 mod deliver;
 mod identity;
+mod presence;
 mod runtime;
 mod store;
 mod util;

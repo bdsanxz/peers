@@ -4,7 +4,14 @@ use crate::util::Res;
 use std::fmt;
 
 pub const RUNTIMES: [&str; 4] = ["opencode", "claude", "antigravity", "pi"];
-pub const KINDS: [&str; 6] = ["request", "ack", "progress", "completion", "receipt", "notice"];
+pub const KINDS: [&str; 6] = [
+    "request",
+    "ack",
+    "progress",
+    "completion",
+    "receipt",
+    "notice",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Address {
@@ -14,7 +21,10 @@ pub struct Address {
 
 impl Address {
     pub fn new(runtime: &str, id: &str) -> Self {
-        Address { runtime: runtime.to_string(), id: id.to_string() }
+        Address {
+            runtime: runtime.to_string(),
+            id: id.to_string(),
+        }
     }
 
     pub fn parse(s: &str) -> Res<Self> {
@@ -26,7 +36,9 @@ impl Address {
             ));
         }
         if runtime == "opencode" && !id.starts_with("ses") {
-            return Err(format!("bad OpenCode session id {id:?}; it must start with 'ses'"));
+            return Err(format!(
+                "bad OpenCode session id {id:?}; it must start with 'ses'"
+            ));
         }
         Ok(Address::new(runtime, id))
     }

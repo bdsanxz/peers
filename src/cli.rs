@@ -2,6 +2,7 @@
 
 use crate::address::{Address, KINDS};
 use crate::identity::{self, own_identity, self_address, session_dir, squad_root};
+use crate::presence::{self, Status};
 use crate::store::{Msg, NewMessage, Profile, Store, PAGE_SIZE};
 use crate::util::*;
 use crate::{channel, deliver, runtime};
@@ -169,13 +170,23 @@ Examples:
     )]
     Send(SendArgs),
 
-    /// List every peer profile in the squad's database
+    /// List every peer profile in the squad's database, with whether it is live
     #[command(after_help = r#"Output:
-  claude:<uuid>  name="Lena"  role=lead  runtime=claude  cwd=<dir>  seen=<time>
-  one line per peer, most recently active first; never you
+  claude:<uuid>  status=live  name="Lena"  role=lead  runtime=claude  cwd=<dir>  seen=<time>
+  pi:<id>  status=replaced  by=claude:<uuid>  name="Sari"  role=qa  ...
+  one line per peer, never you: live ones first, then offline, then replaced; most recently active
+  first within each
+
+Status:
+  live      The session runs now: a peers channel or extension listens, or its runtime shows it open.
+  offline   It does not run, and no other session holds its role. A message waits until it runs.
+  replaced  It does not run, and another session of the same role is live or was seen after it,
+            such as a member restarted on another runtime after hitting a limit. Message the
+            session after `by=` instead; this one will not answer.
 
 Notes:
   - A session is recorded the first time it runs any peers command, or once you message it.
+  - The roles "unassigned" and "user" are shared, so they never replace each other.
 
 Examples:
   peers contacts
@@ -399,7 +410,11 @@ pub fn run(cli: Cli) -> Res<()> {
     let squad = cli.squad.as_deref();
     match cli.cmd {
         Cmd::Whoami => cmd_whoami(),
-        Cmd::List { all_dirs, all, children } => cmd_list(all_dirs, all, children),
+        Cmd::List {
+            all_dirs,
+            all,
+            children,
+        } => cmd_list(all_dirs, all, children),
         Cmd::Send(a) => cmd_send(a, squad),
         Cmd::Contacts => cmd_contacts(squad),
         Cmd::Chats => cmd_chats(squad),
@@ -408,7 +423,10 @@ pub fn run(cli: Cli) -> Res<()> {
         Cmd::Watch => channel::run_watch(),
         Cmd::Channel => channel::run_channel(),
         Cmd::ChannelConfig => {
-            println!("{}", json!({"mcpServers": {"peers": {"command": exe(), "args": ["channel"]}}}));
+            println!(
+                "{}",
+                json!({"mcpServers": {"peers": {"command": exe(), "args": ["channel"]}}})
+            );
             Ok(())
         }
         Cmd::Show { target, last } => {
@@ -458,12 +476,20 @@ impl Ctx {
         };
         let store = Store::open(&root)?;
         identity::register(&store, &me, &dir)?;
-        Ok(Ctx { me, dir, store, explicit })
+        Ok(Ctx {
+            me,
+            dir,
+            store,
+            explicit,
+        })
     }
 
     fn squad_flag(&self) -> String {
         if self.explicit {
-            format!(" --squad {}", shell_word(&self.store.root.display().to_string()))
+            format!(
+                " --squad {}",
+                shell_word(&self.store.root.display().to_string())
+            )
         } else {
             String::new()
         }
@@ -480,7 +506,9 @@ fn plural(n: i64, one: &str, many: &str) -> String {
 
 fn label(p: Option<&Profile>) -> (String, String) {
     let name = p.and_then(|p| p.name.clone()).unwrap_or_default();
-    let role = p.and_then(|p| p.role.clone()).unwrap_or_else(|| "unassigned".into());
+    let role = p
+        .and_then(|p| p.role.clone())
+        .unwrap_or_else(|| "unassigned".into());
     (name, role)
 }
 
@@ -497,7 +525,11 @@ fn cmd_whoami() -> Res<()> {
 
 fn cmd_list(all_dirs: bool, all: bool, children: bool) -> Res<()> {
     let cwd = process_cwd().display().to_string();
-    let me = if identity::in_session() { self_address().ok().map(|a| a.to_string()) } else { None };
+    let me = if identity::in_session() {
+        self_address().ok().map(|a| a.to_string())
+    } else {
+        None
+    };
     let mut rows: Vec<(String, String, String, String, String)> = vec![];
     for s in runtime::claude_sessions(all)? {
         rows.push((
@@ -536,7 +568,9 @@ fn cmd_list(all_dirs: bool, all: bool, children: bool) -> Res<()> {
         let root = squad_root(&canonical(Path::new(&s.cwd)));
         let live = !s.cwd.is_empty()
             && crate::store::db_dir(&root).join("bd.sql").is_file()
-            && Store::open(&root).and_then(|st| st.listener_alive(&format!("pi:{}", s.id))).unwrap_or(false);
+            && Store::open(&root)
+                .and_then(|st| st.listener_alive(&format!("pi:{}", s.id)))
+                .unwrap_or(false);
         if !live && !all && s.modified < recent {
             continue;
         }
@@ -549,10 +583,16 @@ fn cmd_list(all_dirs: bool, all: bool, children: bool) -> Res<()> {
         ));
     }
     for (addr, kind, status, dir, name) in rows {
-        if Some(&addr) == me.as_ref() || (!all_dirs && canonical(Path::new(&dir)).display().to_string() != cwd) {
+        if Some(&addr) == me.as_ref()
+            || (!all_dirs && canonical(Path::new(&dir)).display().to_string() != cwd)
+        {
             continue;
         }
-        let where_ = if all_dirs { format!("  cwd={dir}") } else { String::new() };
+        let where_ = if all_dirs {
+            format!("  cwd={dir}")
+        } else {
+            String::new()
+        };
         println!("{addr}  kind={kind}  status={status}  name={name:?}{where_}");
     }
     Ok(())
@@ -567,7 +607,9 @@ fn read_body(body: Option<String>) -> Res<String> {
         return Ok(String::new());
     }
     let mut s = String::new();
-    stdin.read_to_string(&mut s).map_err(|e| format!("cannot read the body from stdin: {e}"))?;
+    stdin
+        .read_to_string(&mut s)
+        .map_err(|e| format!("cannot read the body from stdin: {e}"))?;
     Ok(s)
 }
 
@@ -593,7 +635,11 @@ fn cmd_send(a: SendArgs, squad: Option<&Path>) -> Res<()> {
     deliver::precheck(&target, a.headless)?;
 
     let c = Ctx::open(squad)?;
-    let (role, name) = own_identity(a.role.as_deref(), a.name.as_deref(), &[process_cwd(), c.dir.clone()]);
+    let (role, name) = own_identity(
+        a.role.as_deref(),
+        a.name.as_deref(),
+        &[process_cwd(), c.dir.clone()],
+    );
     // A role you state updates your profile; the "unassigned" default never replaces a known one.
     let stated = role.is_some();
     let role = role.unwrap_or_else(|| "unassigned".into());
@@ -606,12 +652,15 @@ fn cmd_send(a: SendArgs, squad: Option<&Path>) -> Res<()> {
             cwd: Some(c.dir.display().to_string()),
             updated_at: now_ms(),
         },
-        stated,
+        stated && !identity::acting_for_another(),
     )?;
 
     // The target's own directory decides its own squad, whose database holds its notification queue.
     let known = c.store.profile(&target.to_string())?;
-    let target_dir = known.and_then(|p| p.cwd).map(PathBuf::from).or_else(|| runtime::session_cwd(&target));
+    let target_dir = known
+        .and_then(|p| p.cwd)
+        .map(PathBuf::from)
+        .or_else(|| runtime::session_cwd(&target));
     c.store.upsert_profile(
         &Profile {
             address: target.to_string(),
@@ -641,7 +690,10 @@ fn cmd_send(a: SendArgs, squad: Option<&Path>) -> Res<()> {
     let squad_flag = if at_home {
         String::new()
     } else {
-        format!(" --squad {}", shell_word(&c.store.root.display().to_string()))
+        format!(
+            " --squad {}",
+            shell_word(&c.store.root.display().to_string())
+        )
     };
     let who = with_role(&name.clone().unwrap_or_else(|| sender.to_string()), &role);
     let text = format!(
@@ -658,11 +710,33 @@ fn cmd_send(a: SendArgs, squad: Option<&Path>) -> Res<()> {
         }
         _ => &c.store,
     };
-    let how = deliver::notify(&target, home, &text, &meta, a.headless)
-        .map_err(|e| format!("the message is stored in {target}'s inbox, but its notification failed: {e}"))?;
-    println!("SENT {target}: stored in its inbox ({}); {how}", plural(unread, "unread message", "unread messages"));
+    let how = deliver::notify(&target, home, &text, &meta, a.headless).map_err(|e| {
+        format!("the message is stored in {target}'s inbox, but its notification failed: {e}")
+    })?;
+    println!(
+        "SENT {target}: stored in its inbox ({}); {how}",
+        plural(unread, "unread message", "unread messages")
+    );
+    if how.starts_with("queued") {
+        let me = sender.to_string();
+        let replaced = presence::squad(home, Some(&me))?
+            .into_iter()
+            .find_map(|(p, st)| match st {
+                Status::Replaced(by) if p.address == target.to_string() => Some((by, p.role)),
+                _ => None,
+            });
+        if let Some((by, role)) = replaced {
+            let role = role.unwrap_or_default();
+            println!(
+                "REPLACED: {target} no longer runs, and {by} holds its role ({role}) now; it will not answer. \
+                 Send this message to {by} instead."
+            );
+        }
+    }
     if let Some(r) = &reply_to {
-        println!("REPLY: the answer goes to {r}, not to you. End your turn now; do not wait for it.");
+        println!(
+            "REPLY: the answer goes to {r}, not to you. End your turn now; do not wait for it."
+        );
     } else if ["request", "notice", "completion"].contains(&a.kind.as_str()) {
         println!("{}", reply_hint(&c, &target)?);
     }
@@ -722,18 +796,34 @@ fn reply_hint(c: &Ctx, target: &Address) -> Res<String> {
 
 fn cmd_contacts(squad: Option<&Path>) -> Res<()> {
     let c = Ctx::open(squad)?;
-    let contacts = c.store.contacts(&c.me.to_string())?;
-    if contacts.is_empty() {
+    let me = c.me.to_string();
+    let mut rows: Vec<(Profile, Status)> = presence::squad(&c.store, Some(&me))?
+        .into_iter()
+        .filter(|(p, _)| p.address != me)
+        .collect();
+    if rows.is_empty() {
         println!(
             "No contacts yet in {}: a peer appears here once it runs any peers command in this squad, or once you message it.",
             c.store.root.display()
         );
     }
-    for p in contacts {
+    let rank = |s: &Status| match s {
+        Status::Live => 0,
+        Status::Offline => 1,
+        Status::Replaced(_) => 2,
+    };
+    // A stable sort keeps the database's order, most recently active first, within each status.
+    rows.sort_by_key(|(_, s)| rank(s));
+    for (p, st) in rows {
         let (name, role) = label(Some(&p));
+        let by = match &st {
+            Status::Replaced(by) => format!("  by={by}"),
+            _ => String::new(),
+        };
         println!(
-            "{}  name={name:?}  role={role}  runtime={}  cwd={}  seen={}",
+            "{}  status={}{by}  name={name:?}  role={role}  runtime={}  cwd={}  seen={}",
             p.address,
+            st.word(),
             p.runtime,
             p.cwd.as_deref().unwrap_or("?"),
             local_time(p.updated_at)
@@ -757,8 +847,15 @@ fn cmd_chats(squad: Option<&Path>) -> Res<()> {
         let (name, role) = label(ch.profile.as_ref());
         // The last message's kind and, when you sent it, whether the peer has read it.
         let (from, kind) = if ch.last.sender == owner {
-            let read = ch.last.read_at.map(|t| format!("read {}", local_time(t))).unwrap_or_else(|| "not read yet".into());
-            ("you", format!("{} seq {}, {read}", ch.last.kind, ch.last.seq))
+            let read = ch
+                .last
+                .read_at
+                .map(|t| format!("read {}", local_time(t)))
+                .unwrap_or_else(|| "not read yet".into());
+            (
+                "you",
+                format!("{} seq {}, {read}", ch.last.kind, ch.last.seq),
+            )
         } else {
             ("them", format!("{} seq {}", ch.last.kind, ch.last.seq))
         };
@@ -809,7 +906,11 @@ fn render(m: &Msg, owner: &str, partner: &Partner) {
         "you".to_string()
     } else {
         // A message sent without a name or role speaks as the partner its profile knows.
-        let name = m.sender_name.as_deref().filter(|n| !n.is_empty()).unwrap_or(partner.name);
+        let name = m
+            .sender_name
+            .as_deref()
+            .filter(|n| !n.is_empty())
+            .unwrap_or(partner.name);
         let role = &m.sender_role;
         if role != "unassigned" && role != partner.role && !name.contains(&format!("({role})")) {
             meta.push(format!("as {role}"));
@@ -817,9 +918,18 @@ fn render(m: &Msg, owner: &str, partner: &Partner) {
         if m.read_at.is_none() {
             meta.push("new".into());
         }
-        if name.is_empty() { "partner".to_string() } else { name.to_string() }
+        if name.is_empty() {
+            "partner".to_string()
+        } else {
+            name.to_string()
+        }
     };
-    println!("[{who}] #{} {}  {}", m.id, local_fmt(m.sent_at, "%H:%M"), meta.join(" · "));
+    println!(
+        "[{who}] #{} {}  {}",
+        m.id,
+        local_fmt(m.sent_at, "%H:%M"),
+        meta.join(" · ")
+    );
     for line in m.body.trim_end().lines() {
         if line.is_empty() {
             println!();
@@ -837,7 +947,10 @@ fn cmd_open(target: &str, page: i64, squad: Option<&Path>) -> Res<()> {
     let peer_s = peer.to_string();
     let total = c.store.chat_count(&owner, &peer_s)?;
     if total == 0 {
-        println!("No chat with {peer} in your inbox in {}.", c.store.root.display());
+        println!(
+            "No chat with {peer} in your inbox in {}.",
+            c.store.root.display()
+        );
         return Ok(());
     }
     let pages = (total + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -849,7 +962,10 @@ fn cmd_open(target: &str, page: i64, squad: Option<&Path>) -> Res<()> {
     }
     let msgs = c.store.page(&owner, &peer_s, page)?;
     let (name, role) = label(c.store.profile(&peer_s)?.as_ref());
-    let partner = Partner { name: &name, role: &role };
+    let partner = Partner {
+        name: &name,
+        role: &role,
+    };
     let last = total - (page - 1) * PAGE_SIZE;
     let first = last - msgs.len() as i64 + 1;
     if name.is_empty() {
@@ -859,7 +975,10 @@ fn cmd_open(target: &str, page: i64, squad: Option<&Path>) -> Res<()> {
     }
     println!("page {page} of {pages}  (messages {first}-{last} of {total}, oldest first; page 1 holds the newest)\n");
     // Like a messenger: a line for each new day, and one above the first unread message.
-    let unread = msgs.iter().filter(|m| m.recipient == owner && m.read_at.is_none()).count() as i64;
+    let unread = msgs
+        .iter()
+        .filter(|m| m.recipient == owner && m.read_at.is_none())
+        .count() as i64;
     let mut day = String::new();
     let mut divided = false;
     for m in &msgs {
@@ -869,18 +988,28 @@ fn cmd_open(target: &str, page: i64, squad: Option<&Path>) -> Res<()> {
             day = d;
         }
         if !divided && m.recipient == owner && m.read_at.is_none() {
-            println!("── {} ──\n", plural(unread, "unread message", "unread messages"));
+            println!(
+                "── {} ──\n",
+                plural(unread, "unread message", "unread messages")
+            );
             divided = true;
         }
         render(m, &owner, &partner);
     }
-    let new: Vec<i64> = msgs.iter().filter(|m| m.recipient == owner && m.read_at.is_none()).map(|m| m.id).collect();
+    let new: Vec<i64> = msgs
+        .iter()
+        .filter(|m| m.recipient == owner && m.read_at.is_none())
+        .map(|m| m.id)
+        .collect();
     c.store.mark_read(&owner, &new)?;
     let flag = c.squad_flag();
     if page < pages {
         let older_unread = c.store.unread_before(&owner, &peer_s, msgs[0].id)?;
         let note = if older_unread > 0 {
-            format!("  ({} on older pages)", plural(older_unread, "unread message", "unread messages"))
+            format!(
+                "  ({} on older pages)",
+                plural(older_unread, "unread message", "unread messages")
+            )
         } else {
             String::new()
         };
@@ -890,7 +1019,10 @@ fn cmd_open(target: &str, page: i64, squad: Option<&Path>) -> Res<()> {
         println!("NEWER: peers open {peer}{flag} --page {}", page - 1);
     }
     let left = c.store.unread_total(&owner)?;
-    println!("INBOX: {} left in your inbox", plural(left, "unread message", "unread messages"));
+    println!(
+        "INBOX: {} left in your inbox",
+        plural(left, "unread message", "unread messages")
+    );
     Ok(())
 }
 
@@ -915,13 +1047,18 @@ const PI_EXTENSION: &str = include_str!("pi_extension.ts");
 /// Writes the extension to `<cache root>/pi-extension/peers.ts` when the file is missing or
 /// differs, and returns its path.
 fn pi_extension_file() -> Res<PathBuf> {
-    let file = crate::store::cache_root().join("pi-extension").join("peers.ts");
+    let file = crate::store::cache_root()
+        .join("pi-extension")
+        .join("peers.ts");
     if std::fs::read_to_string(&file).ok().as_deref() != Some(PI_EXTENSION) {
         let dir = file.parent().expect("the file has a directory");
-        std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let tmp = dir.join(format!(".peers.ts.{}", std::process::id()));
-        std::fs::write(&tmp, PI_EXTENSION).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, &file).map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+        std::fs::write(&tmp, PI_EXTENSION)
+            .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &file)
+            .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
     }
     Ok(file)
 }

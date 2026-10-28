@@ -62,13 +62,24 @@ COMMIT;
 ";
 
 pub fn cache_root() -> PathBuf {
-    env_nonempty("PEERS_CACHE").map(PathBuf::from).unwrap_or_else(|| home().join(".local/cache/peers"))
+    env_nonempty("PEERS_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".local/cache/peers"))
 }
 
 /// A directory path as one folder name, the way Claude Code names its project folders:
 /// every character other than a letter, digit or dash becomes a dash.
 pub fn dashed(p: &Path) -> String {
-    p.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect()
+    p.to_string_lossy()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 pub fn db_dir(root: &Path) -> PathBuf {
@@ -128,7 +139,8 @@ pub struct Msg {
     pub read_at: Option<i64>,
 }
 
-const MSG_COLS: &str = "id, sender, recipient, sender_name, sender_role, kind, seq, reply_to, body, sent_at, read_at";
+const MSG_COLS: &str =
+    "id, sender, recipient, sender_name, sender_role, kind, seq, reply_to, body, sent_at, read_at";
 
 impl Msg {
     fn from_row(r: &Row<'_>) -> rusqlite::Result<Msg> {
@@ -171,12 +183,17 @@ const CHAT_WHERE: &str = "((sender = ?1 AND recipient = ?2) OR (sender = ?2 AND 
 impl Store {
     pub fn open(root: &Path) -> Res<Store> {
         let dir = db_dir(root);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let path = dir.join("bd.sql");
-        let conn = Connection::open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+        let conn =
+            Connection::open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
         conn.busy_timeout(Duration::from_secs(15)).map_err(db)?;
-        conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(())).map_err(db)?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(db)?;
+        conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
+            .map_err(db)?;
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(db)?;
         if version > SCHEMA_VERSION {
             return Err(format!(
                 "{} has schema version {version}, newer than this peers understands ({SCHEMA_VERSION}); \
@@ -187,7 +204,11 @@ impl Store {
         if version < 1 {
             conn.execute_batch(SCHEMA_V1).map_err(db)?;
         }
-        Ok(Store { conn, root: root.to_path_buf(), dir })
+        Ok(Store {
+            conn,
+            root: root.to_path_buf(),
+            dir,
+        })
     }
 
     /// Adds or refreshes a profile. With `overwrite`, its name and role are replaced, even by
@@ -255,7 +276,11 @@ impl Store {
 
     pub fn chat_count(&self, owner: &str, peer: &str) -> Res<i64> {
         self.conn
-            .query_row(&format!("SELECT COUNT(*) FROM messages WHERE {CHAT_WHERE}"), [owner, peer], |r| r.get(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM messages WHERE {CHAT_WHERE}"),
+                [owner, peer],
+                |r| r.get(0),
+            )
             .map_err(db)
     }
 
@@ -266,7 +291,10 @@ impl Store {
             .prepare(&format!("SELECT {MSG_COLS} FROM messages WHERE {CHAT_WHERE} ORDER BY id DESC LIMIT ?3 OFFSET ?4"))
             .map_err(db)?;
         let rows = stmt
-            .query_map(params![owner, peer, PAGE_SIZE, (page - 1) * PAGE_SIZE], Msg::from_row)
+            .query_map(
+                params![owner, peer, PAGE_SIZE, (page - 1) * PAGE_SIZE],
+                Msg::from_row,
+            )
             .map_err(db)?;
         let mut msgs: Vec<Msg> = rows.collect::<Result<_, _>>().map_err(db)?;
         msgs.reverse();
@@ -314,7 +342,9 @@ impl Store {
             )
             .map_err(db)?;
         let rows: Vec<(String, i64, i64, i64)> = stmt
-            .query_map([owner], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .query_map([owner], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
             .map_err(db)?
             .collect::<Result<_, _>>()
             .map_err(db)?;
@@ -322,10 +352,20 @@ impl Store {
         for (peer, total, unread, last_id) in rows {
             let last = self
                 .conn
-                .query_row(&format!("SELECT {MSG_COLS} FROM messages WHERE id = ?1"), [last_id], Msg::from_row)
+                .query_row(
+                    &format!("SELECT {MSG_COLS} FROM messages WHERE id = ?1"),
+                    [last_id],
+                    Msg::from_row,
+                )
                 .map_err(db)?;
             let profile = self.profile(&peer)?;
-            chats.push(Chat { peer, total, unread, last, profile });
+            chats.push(Chat {
+                peer,
+                total,
+                unread,
+                last,
+                profile,
+            });
         }
         Ok(chats)
     }
@@ -334,9 +374,11 @@ impl Store {
     pub fn delete_chat(&self, owner: &str, peer: &str) -> Res<i64> {
         let (count, max_id): (i64, Option<i64>) = self
             .conn
-            .query_row(&format!("SELECT COUNT(*), MAX(id) FROM messages WHERE {CHAT_WHERE}"), [owner, peer], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                &format!("SELECT COUNT(*), MAX(id) FROM messages WHERE {CHAT_WHERE}"),
+                [owner, peer],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .map_err(db)?;
         if let Some(max_id) = max_id {
             self.conn
@@ -362,12 +404,17 @@ impl Store {
 
     /// Takes every notification not yet delivered to `owner`, oldest first, and marks it delivered.
     pub fn take_notifications(&mut self, owner: &str) -> Res<Vec<(String, serde_json::Value)>> {
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(db)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db)?;
         let taken: Vec<(i64, String, String)> = {
             let mut stmt = tx
                 .prepare("SELECT id, text, meta FROM notifications WHERE owner = ?1 AND delivered_at IS NULL ORDER BY id")
                 .map_err(db)?;
-            let rows = stmt.query_map([owner], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(db)?;
+            let rows = stmt
+                .query_map([owner], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map_err(db)?;
             rows.collect::<Result<_, _>>().map_err(db)?
         };
         if let Some((last, _, _)) = taken.last() {
@@ -380,7 +427,12 @@ impl Store {
         tx.commit().map_err(db)?;
         Ok(taken
             .into_iter()
-            .map(|(_, text, meta)| (text, serde_json::from_str(&meta).unwrap_or(serde_json::Value::Null)))
+            .map(|(_, text, meta)| {
+                (
+                    text,
+                    serde_json::from_str(&meta).unwrap_or(serde_json::Value::Null),
+                )
+            })
             .collect())
     }
 
@@ -396,7 +448,12 @@ impl Store {
     }
 
     pub fn clear_listener(&self, owner: &str, pid: u32) -> Res<()> {
-        self.conn.execute("DELETE FROM listeners WHERE owner = ?1 AND pid = ?2", params![owner, pid]).map_err(db)?;
+        self.conn
+            .execute(
+                "DELETE FROM listeners WHERE owner = ?1 AND pid = ?2",
+                params![owner, pid],
+            )
+            .map_err(db)?;
         Ok(())
     }
 
@@ -404,13 +461,19 @@ impl Store {
     pub fn listener_alive(&self, owner: &str) -> Res<bool> {
         let pid: Option<i64> = self
             .conn
-            .query_row("SELECT pid FROM listeners WHERE owner = ?1", [owner], |r| r.get(0))
+            .query_row("SELECT pid FROM listeners WHERE owner = ?1", [owner], |r| {
+                r.get(0)
+            })
             .optional()
             .map_err(db)?;
         // A channel killed with its session leaves its row behind; its pid counts only while it is
         // still a peers process, not another program that reused the number.
         Ok(pid.is_some_and(|pid| {
-            process_alive(pid) && crate::identity::basename_lower(&quiet("ps", &["-o", "comm=", "-p", &pid.to_string()])) == "peers"
+            process_alive(pid)
+                && crate::identity::basename_lower(&quiet(
+                    "ps",
+                    &["-o", "comm=", "-p", &pid.to_string()],
+                )) == "peers"
         }))
     }
 }

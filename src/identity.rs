@@ -16,7 +16,10 @@ pub const SELF_VARS: [(&str, &str); 4] = [
 ];
 
 pub fn basename_lower(comm: &str) -> String {
-    Path::new(comm.trim()).file_name().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default()
+    Path::new(comm.trim())
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
 }
 
 /// Walks the ancestor processes, nearest first, calling `f(pid, command)` until it returns Some.
@@ -56,8 +59,29 @@ pub fn self_address() -> Res<Address> {
     if let Some(s) = env_nonempty("PEERS_SELF") {
         return Address::parse(&s);
     }
-    let found: Vec<(&str, String)> =
-        SELF_VARS.iter().filter_map(|(rt, var)| env_nonempty(var).map(|id| (*rt, id))).collect();
+    detected_address()
+}
+
+/// Whether PEERS_SELF names another session than the one this process runs in, such as a member
+/// restarted on another runtime reading its old session's inbox. That session is not running, so
+/// acting as it must not refresh its profile, or it would look newer than the session that took
+/// over its role.
+pub fn acting_for_another() -> bool {
+    match (
+        env_nonempty("PEERS_SELF").and_then(|s| Address::parse(&s).ok()),
+        detected_address().ok(),
+    ) {
+        (Some(chosen), Some(real)) => chosen != real,
+        _ => false,
+    }
+}
+
+/// The session this process runs in, from the runtimes' variables and its ancestors.
+fn detected_address() -> Res<Address> {
+    let found: Vec<(&str, String)> = SELF_VARS
+        .iter()
+        .filter_map(|(rt, var)| env_nonempty(var).map(|id| (*rt, id)))
+        .collect();
     let names = |all: bool| {
         SELF_VARS
             .iter()
@@ -116,7 +140,7 @@ pub fn squad_root(dir: &Path) -> PathBuf {
 /// .peers.json replaces the stored role and name; without one, only missing values are filled.
 pub fn register(store: &Store, me: &Address, dir: &Path) -> Res<()> {
     let (role, name) = own_identity(None, None, &[process_cwd(), dir.to_path_buf()]);
-    let overwrite = role.is_some();
+    let overwrite = role.is_some() && !acting_for_another();
     store.upsert_profile(
         &Profile {
             address: me.to_string(),
@@ -138,7 +162,11 @@ fn identity_file(dirs: &[PathBuf]) -> Option<Value> {
             let path = x.join(".peers.json");
             if let Ok(text) = std::fs::read_to_string(&path) {
                 if let Ok(v) = serde_json::from_str::<Value>(&text) {
-                    if v.get("role").and_then(Value::as_str).map(|r| !r.trim().is_empty()) == Some(true) {
+                    if v.get("role")
+                        .and_then(Value::as_str)
+                        .map(|r| !r.trim().is_empty())
+                        == Some(true)
+                    {
                         return Some(v);
                     }
                 }
@@ -153,14 +181,26 @@ fn identity_file(dirs: &[PathBuf]) -> Option<Value> {
 /// $PEERS_ROLE, then the nearest .peers.json; None means "unassigned". The name comes from
 /// --name, then $PEERS_NAME, then that .peers.json's display_name, but only when the role came
 /// from it too, so `--role user` never borrows a member's name.
-pub fn own_identity(role_flag: Option<&str>, name_flag: Option<&str>, dirs: &[PathBuf]) -> (Option<String>, Option<String>) {
+pub fn own_identity(
+    role_flag: Option<&str>,
+    name_flag: Option<&str>,
+    dirs: &[PathBuf],
+) -> (Option<String>, Option<String>) {
     let clean = |s: Option<String>| s.map(|v| one_line(&v)).filter(|v| !v.is_empty());
-    let mut role = clean(role_flag.map(String::from)).or_else(|| clean(std::env::var("PEERS_ROLE").ok()));
-    let mut name = clean(name_flag.map(String::from)).or_else(|| clean(std::env::var("PEERS_NAME").ok()));
+    let mut role =
+        clean(role_flag.map(String::from)).or_else(|| clean(std::env::var("PEERS_ROLE").ok()));
+    let mut name =
+        clean(name_flag.map(String::from)).or_else(|| clean(std::env::var("PEERS_NAME").ok()));
     if role.is_none() {
         if let Some(data) = identity_file(dirs) {
             role = clean(data.get("role").and_then(Value::as_str).map(String::from));
-            name = name.or_else(|| clean(data.get("display_name").and_then(Value::as_str).map(String::from)));
+            name = name.or_else(|| {
+                clean(
+                    data.get("display_name")
+                        .and_then(Value::as_str)
+                        .map(String::from),
+                )
+            });
         }
     }
     (role, name)

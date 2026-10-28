@@ -45,8 +45,15 @@ fn channel_session() -> Option<(Address, PathBuf)> {
             return None;
         }
         let path = home().join(format!(".claude/sessions/{pid}.json"));
-        let v: Value = std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        Some(v["sessionId"].as_str().map(|sid| (sid.to_string(), v["cwd"].as_str().map(PathBuf::from))))
+        let v: Value = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        Some(
+            v["sessionId"]
+                .as_str()
+                .map(|sid| (sid.to_string(), v["cwd"].as_str().map(PathBuf::from))),
+        )
     })
     .flatten();
     if let Some((sid, cwd)) = record {
@@ -97,7 +104,8 @@ fn deliver_loop(state: Arc<Mutex<Option<(String, PathBuf)>>>) {
                             if let Err(e) = s.set_listener(&owner, pid) {
                                 eprintln!("peers channel: {e}");
                             }
-                            *state.lock().unwrap_or_else(|p| p.into_inner()) = Some((owner.clone(), root));
+                            *state.lock().unwrap_or_else(|p| p.into_inner()) =
+                                Some((owner.clone(), root));
                             current = Some((owner, s));
                         }
                         Err(e) => eprintln!("peers channel: {e}"),
@@ -110,8 +118,10 @@ fn deliver_loop(state: Arc<Mutex<Option<(String, PathBuf)>>>) {
             match s.take_notifications(owner) {
                 Ok(list) => {
                     for (text, meta) in list {
-                        emit(&json!({"jsonrpc": "2.0", "method": "notifications/claude/channel",
-                                     "params": {"content": text, "meta": string_meta(&meta)}}));
+                        emit(
+                            &json!({"jsonrpc": "2.0", "method": "notifications/claude/channel",
+                                     "params": {"content": text, "meta": string_meta(&meta)}}),
+                        );
                     }
                 }
                 Err(e) => eprintln!("peers channel: {e}"),
@@ -126,7 +136,9 @@ pub fn run_channel() -> Res<()> {
     let mut started = false;
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
-        let Ok(req) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(req) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let method = req["method"].as_str().unwrap_or("");
         let id = req.get("id").cloned().unwrap_or(Value::Null);
         match method {
@@ -210,7 +222,10 @@ pub fn run_pi_listen(address: &str, cwd: Option<&std::path::Path>) -> Res<()> {
                 let mut out = io::stdout().lock();
                 let mut broken = false;
                 for (text, _) in list {
-                    if writeln!(out, "{}", one_line(&text)).and_then(|_| out.flush()).is_err() {
+                    if writeln!(out, "{}", one_line(&text))
+                        .and_then(|_| out.flush())
+                        .is_err()
+                    {
                         broken = true;
                         break;
                     }

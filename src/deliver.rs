@@ -42,7 +42,13 @@ fn queued(reason: &str, when: &str) -> String {
 /// Delivers `text` to `target`, whose own notification queue, logs and run queues live in
 /// `home` (the database of the target's own squad). With `headless`, a session that is not live
 /// is run headless for one turn. Returns how it went, for the SENT line.
-pub fn notify(target: &Address, home: &Store, text: &str, meta: &Value, headless: bool) -> Res<String> {
+pub fn notify(
+    target: &Address,
+    home: &Store,
+    text: &str,
+    meta: &Value,
+    headless: bool,
+) -> Res<String> {
     match target.runtime.as_str() {
         "opencode" => notify_opencode(&target.id, text, headless),
         "antigravity" => notify_antigravity(target, home, text, meta, headless),
@@ -75,7 +81,7 @@ pub fn notify(target: &Address, home: &Store, text: &str, meta: &Value, headless
 /// herdr whose title names the session's title and no other session's; or an OpenCode pane in herdr
 /// working in the session's directory, when the session is the newest top-level one there (the one
 /// a TUI started in that directory shows).
-fn opencode_open(sid: &str, sessions: &[Value]) -> bool {
+pub(crate) fn opencode_open(sid: &str, sessions: &[Value]) -> bool {
     let by_args = quiet("ps", &["-ax", "-o", "args="]).lines().any(|l| {
         let mut words = l.split_whitespace();
         words.next().map(identity_name).as_deref() == Some("opencode") && words.any(|w| w == sid)
@@ -83,32 +89,51 @@ fn opencode_open(sid: &str, sessions: &[Value]) -> bool {
     if by_args {
         return true;
     }
-    let Some(me) = sessions.iter().find(|s| s["id"].as_str() == Some(sid)) else { return false };
+    let Some(me) = sessions.iter().find(|s| s["id"].as_str() == Some(sid)) else {
+        return false;
+    };
     let panes = herdr_agents("opencode");
     if panes.is_empty() {
         return false;
     }
     if let Some(title) = me["title"].as_str().filter(|t| !t.is_empty()) {
-        if sessions.iter().filter(|s| s["title"].as_str() == Some(title)).count() == 1 {
+        if sessions
+            .iter()
+            .filter(|s| s["title"].as_str() == Some(title))
+            .count()
+            == 1
+        {
             let wanted = format!("OC | {title}");
-            if panes.iter().any(|(_, a)| a["terminal_title"].as_str().map(str::trim) == Some(wanted.as_str())) {
+            if panes
+                .iter()
+                .any(|(_, a)| a["terminal_title"].as_str().map(str::trim) == Some(wanted.as_str()))
+            {
                 return true;
             }
         }
     }
-    let Some(dir) = runtime::opencode_dir(me).map(|d| canonical(Path::new(&d))) else { return false };
+    let Some(dir) = runtime::opencode_dir(me).map(|d| canonical(Path::new(&d))) else {
+        return false;
+    };
     let top = |s: &&Value| s["parentID"].as_str().is_none_or(|p| p.is_empty());
     let updated = |s: &Value| s["time"]["updated"].as_i64().unwrap_or(0);
     let newest = sessions
         .iter()
         .filter(top)
-        .filter(|s| runtime::opencode_dir(s).map(|d| canonical(Path::new(&d))).as_ref() == Some(&dir))
+        .filter(|s| {
+            runtime::opencode_dir(s)
+                .map(|d| canonical(Path::new(&d)))
+                .as_ref()
+                == Some(&dir)
+        })
         .max_by_key(|s| updated(s));
     if newest.and_then(|s| s["id"].as_str()) != Some(sid) {
         return false;
     }
     panes.iter().any(|(_, a)| {
-        ["foreground_cwd", "cwd"].iter().any(|k| a[*k].as_str().map(|c| canonical(Path::new(c))).as_ref() == Some(&dir))
+        ["foreground_cwd", "cwd"]
+            .iter()
+            .any(|k| a[*k].as_str().map(|c| canonical(Path::new(c))).as_ref() == Some(&dir))
     })
 }
 
@@ -121,14 +146,17 @@ fn notify_opencode(sid: &str, text: &str, headless: bool) -> Res<String> {
         return Err("opencode is not on PATH".into());
     }
     let sessions = runtime::opencode_sessions()?;
-    let running = sessions.iter().any(|s| s["id"].as_str() == Some(sid) && s["_status"].as_str() == Some("running"));
+    let running = sessions
+        .iter()
+        .any(|s| s["id"].as_str() == Some(sid) && s["_status"].as_str() == Some("running"));
     let open = !running && opencode_open(sid, &sessions);
     // Steer, so the input shows in an open TUI at once. resume=false only admits it to the
     // session's inbox, where it waits for the session's next turn without a run of its own.
     let resume = running || open || headless;
     let payload = json!({"text": text, "delivery": "steer", "resume": resume}).to_string();
     let path = format!("/api/session/{sid}/prompt");
-    let got = run_json("opencode", &["api", "post", &path, "--data", &payload])?.ok_or("opencode is not on PATH")?;
+    let got = run_json("opencode", &["api", "post", &path, "--data", &payload])?
+        .ok_or("opencode is not on PATH")?;
     let msg = got.get("data").unwrap_or(&got);
     let id = msg["id"].as_str().unwrap_or("?");
     Ok(if running {
@@ -161,7 +189,14 @@ fn notify_claude_resume(sid: &str, home: &Store, text: &str) -> Res<String> {
     // Claude peers always skip permission prompts: a headless peer has nobody to answer them.
     // The prompt goes on stdin so no multi-value flag can swallow it.
     let mut child = Command::new("claude")
-        .args(["-p", "--resume", sid, "--output-format", "json", "--dangerously-skip-permissions"])
+        .args([
+            "-p",
+            "--resume",
+            sid,
+            "--output-format",
+            "json",
+            "--dangerously-skip-permissions",
+        ])
         .stdin(Stdio::piped())
         .stdout(out)
         .stderr(err)
@@ -169,12 +204,18 @@ fn notify_claude_resume(sid: &str, home: &Store, text: &str) -> Res<String> {
         .spawn()
         .map_err(|e| format!("cannot start claude: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes()).map_err(|e| format!("cannot write to claude: {e}"))?;
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("cannot write to claude: {e}"))?;
     }
-    Ok(format!("notified via headless resume pid={} log={}", child.id(), log.display()))
+    Ok(format!(
+        "notified via headless resume pid={} log={}",
+        child.id(),
+        log.display()
+    ))
 }
 
-enum Tui {
+pub(crate) enum Tui {
     None,
     Herdr(String, String),
     Terminal(String),
@@ -182,7 +223,7 @@ enum Tui {
 
 /// Where the conversation is open in an agy TUI. Every agy process on a conversation holds its
 /// presence lock; a TUI has a terminal, a headless run has none.
-fn antigravity_tui(cid: &str) -> Tui {
+pub(crate) fn antigravity_tui(cid: &str) -> Tui {
     let lock = agy_home().join("presence").join(format!("{cid}.lock"));
     if !lock.exists() || which("lsof").is_none() {
         return Tui::None;
@@ -193,11 +234,17 @@ fn antigravity_tui(cid: &str) -> Tui {
     for pid in pids.split_whitespace() {
         let tty = quiet("ps", &["-o", "tty=", "-p", pid]);
         if !tty.is_empty() && !tty.contains('?') {
-            ttys.insert(if tty.starts_with("/dev/") { tty } else { format!("/dev/{tty}") });
+            ttys.insert(if tty.starts_with("/dev/") {
+                tty
+            } else {
+                format!("/dev/{tty}")
+            });
             tui_pids.push(pid.to_string());
         }
     }
-    let Some(first) = ttys.into_iter().next() else { return Tui::None };
+    let Some(first) = ttys.into_iter().next() else {
+        return Tui::None;
+    };
     if which("herdr").is_some() {
         if let Some((session, pane)) = herdr_pane(&tui_pids) {
             return Tui::Herdr(session, pane);
@@ -226,7 +273,9 @@ fn herdr_agents(kind: &str) -> Vec<(String, Value)> {
         if session["running"].as_bool() != Some(true) {
             continue;
         }
-        let Some(name) = session["name"].as_str() else { continue };
+        let Some(name) = session["name"].as_str() else {
+            continue;
+        };
         let agents = herdr_json(&["--session", name, "agent", "list"]);
         for agent in agents["result"]["agents"].as_array().into_iter().flatten() {
             if agent["agent"].as_str() == Some(kind) {
@@ -238,7 +287,11 @@ fn herdr_agents(kind: &str) -> Vec<(String, Value)> {
 }
 
 fn herdr_json(args: &[&str]) -> Value {
-    match Command::new("herdr").args(args).stdin(Stdio::null()).output() {
+    match Command::new("herdr")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+    {
         Ok(o) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or(Value::Null),
         _ => Value::Null,
     }
@@ -250,11 +303,17 @@ fn herdr_json(args: &[&str]) -> Value {
 fn herdr_pane(pids: &[String]) -> Option<(String, String)> {
     let ancestors: BTreeSet<String> = pids.iter().flat_map(|p| process_ancestors(p)).collect();
     for (name, agent) in herdr_agents("agy") {
-        let Some(pane) = agent["pane_id"].as_str() else { continue };
+        let Some(pane) = agent["pane_id"].as_str() else {
+            continue;
+        };
         let info = herdr_json(&["--session", &name, "pane", "process-info", "--pane", pane]);
         let info = &info["result"]["process_info"];
-        let mut owned: BTreeSet<String> =
-            info["foreground_processes"].as_array().into_iter().flatten().map(|p| p["pid"].to_string()).collect();
+        let mut owned: BTreeSet<String> = info["foreground_processes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| p["pid"].to_string())
+            .collect();
         owned.insert(info["shell_pid"].to_string());
         if owned.iter().any(|p| ancestors.contains(p)) {
             return Some((name, pane.to_string()));
@@ -280,19 +339,36 @@ fn runtime_queue_dir(home_dir: &Path, runtime: &str, id: &str) -> Res<PathBuf> {
 fn paste_into_tui(qdir: &Path, session: &str, pane: &str, text: &str) -> Res<()> {
     let _lock = flock(&qdir.join(".paste.lock"), false)?;
     let out = Command::new("herdr")
-        .args(["--session", session, "agent", "prompt", pane, text.trim_end_matches('\n')])
+        .args([
+            "--session",
+            session,
+            "agent",
+            "prompt",
+            pane,
+            text.trim_end_matches('\n'),
+        ])
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("cannot run herdr: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let msg = if err.is_empty() { String::from_utf8_lossy(&out.stdout).trim().to_string() } else { err };
+        let msg = if err.is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            err
+        };
         return Err(format!("herdr agent prompt failed: {msg}"));
     }
     Ok(())
 }
 
-fn notify_antigravity(target: &Address, home: &Store, text: &str, meta: &Value, headless: bool) -> Res<String> {
+fn notify_antigravity(
+    target: &Address,
+    home: &Store,
+    text: &str,
+    meta: &Value,
+    headless: bool,
+) -> Res<String> {
     let cid = target.id.as_str();
     let address = target.to_string();
     let qdir = queue_dir(&home.dir, cid)?;
@@ -348,7 +424,10 @@ fn notify_antigravity(target: &Address, home: &Store, text: &str, meta: &Value, 
         .process_group(0)
         .spawn()
         .map_err(|e| format!("cannot start the antigravity drainer: {e}"))?;
-    let log = home.dir.join("logs").join(format!("antigravity-{cid}-{s}.json"));
+    let log = home
+        .dir
+        .join("logs")
+        .join(format!("antigravity-{cid}-{s}.json"));
     Ok(format!(
         "notified via headless resume (queued behind any run in progress) drainer={} log={}",
         child.id(),
@@ -359,7 +438,10 @@ fn notify_antigravity(target: &Address, home: &Store, text: &str, meta: &Value, 
 fn pending(qdir: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(qdir)
         .map(|rd| {
-            rd.flatten().map(|e| e.path()).filter(|p| p.extension().and_then(|x| x.to_str()) == Some("md")).collect()
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("md"))
+                .collect()
         })
         .unwrap_or_default();
     v.sort();
@@ -383,14 +465,25 @@ pub fn drain_antigravity(cid: &str, home_dir: &Path) -> Res<()> {
                 let _ = fs::remove_file(&entry);
                 continue;
             }
-            let s = entry.file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+            let s = entry
+                .file_stem()
+                .map(|x| x.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let log = logs.join(format!("antigravity-{cid}-{s}.json"));
             let _ = fs::write(logs.join(format!("antigravity-{cid}-{s}.prompt.md")), &text);
             let out = File::create(&log).map_err(|e| e.to_string())?;
             let err = out.try_clone().map_err(|e| e.to_string())?;
             // Antigravity peers always skip permission prompts; -p takes the prompt, so it goes last.
             let _ = Command::new("agy")
-                .args(["--conversation", cid, "--dangerously-skip-permissions", "--output-format", "json", "-p", &text])
+                .args([
+                    "--conversation",
+                    cid,
+                    "--dangerously-skip-permissions",
+                    "--output-format",
+                    "json",
+                    "-p",
+                    &text,
+                ])
                 .stdin(Stdio::null())
                 .stdout(out)
                 .stderr(err)
@@ -405,7 +498,13 @@ pub fn drain_antigravity(cid: &str, home_dir: &Path) -> Res<()> {
 }
 
 /// Spools `text` for a headless run of `runtime` on session `id`, and starts a drainer for it.
-fn spool(home: &Store, runtime: &str, id: &str, text: &str, drain_args: &[&std::ffi::OsStr]) -> Res<(u32, String)> {
+fn spool(
+    home: &Store,
+    runtime: &str,
+    id: &str,
+    text: &str,
+    drain_args: &[&std::ffi::OsStr],
+) -> Res<(u32, String)> {
     let qdir = runtime_queue_dir(&home.dir, runtime, id)?;
     let s = stamp();
     let entry = qdir.join(format!("{s}.md"));
@@ -426,11 +525,19 @@ fn spool(home: &Store, runtime: &str, id: &str, text: &str, drain_args: &[&std::
 /// A live pi session with the peers extension takes the notification from its queue as a turn;
 /// any other pi session finds it queued when it next starts with the extension, or, with
 /// `headless`, gets one headless run per notification, in order.
-fn notify_pi(target: &Address, home: &Store, text: &str, meta: &Value, headless: bool) -> Res<String> {
+fn notify_pi(
+    target: &Address,
+    home: &Store,
+    text: &str,
+    meta: &Value,
+    headless: bool,
+) -> Res<String> {
     let address = target.to_string();
     if home.listener_alive(&address)? {
         home.push_notification(&address, text, meta)?;
-        return Ok("notified via the peers pi extension (it arrives in the session as a turn)".into());
+        return Ok(
+            "notified via the peers pi extension (it arrives in the session as a turn)".into(),
+        );
     }
     if !headless {
         home.push_notification(&address, text, meta)?;
@@ -454,9 +561,17 @@ fn notify_pi(target: &Address, home: &Store, text: &str, meta: &Value, headless:
         "pi",
         &target.id,
         text,
-        &["_drain-pi".as_ref(), target.id.as_ref(), "--root".as_ref(), home.root.as_os_str()],
+        &[
+            "_drain-pi".as_ref(),
+            target.id.as_ref(),
+            "--root".as_ref(),
+            home.root.as_os_str(),
+        ],
     )?;
-    let log = home.dir.join("logs").join(format!("pi-{}-{s}.jsonl", target.id));
+    let log = home
+        .dir
+        .join("logs")
+        .join(format!("pi-{}-{s}.jsonl", target.id));
     Ok(format!(
         "notified via headless resume (no peers extension is listening in it; queued behind any run in progress) \
          drainer={pid} log={}",
@@ -482,7 +597,10 @@ pub fn drain_pi(id: &str, root: &Path) -> Res<()> {
                 let _ = fs::remove_file(&entry);
                 continue;
             }
-            let s = entry.file_stem().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+            let s = entry
+                .file_stem()
+                .map(|x| x.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let log = logs.join(format!("pi-{id}-{s}.jsonl"));
             let _ = fs::write(logs.join(format!("pi-{id}-{s}.prompt.md")), &text);
             let out = File::create(&log).map_err(|e| e.to_string())?;
