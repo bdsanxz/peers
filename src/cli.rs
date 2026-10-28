@@ -288,7 +288,7 @@ Examples:
   - Pushes each notification for its session into the conversation as a turn.
 
 Examples:
-  claude --mcp-config "$(peers channel-config)" --dangerously-load-development-channels server:peers"#)]
+  claude --mcp-config "$(peers channel-config)""#)]
     Channel,
 
     /// Print the --mcp-config JSON that loads the peers channel
@@ -296,7 +296,7 @@ Examples:
   {"mcpServers":{"peers":{"args":["channel"],"command":"/abs/path/to/peers"}}}
 
 Examples:
-  claude --mcp-config "$(peers channel-config)" --dangerously-load-development-channels server:peers"#)]
+  claude --mcp-config "$(peers channel-config)""#)]
     ChannelConfig,
 
     /// Print the pi extension that delivers notifications into pi sessions

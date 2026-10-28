@@ -14,7 +14,7 @@ The receiver reads the chat with `peers open` and answers with its own `peers se
 - **Claude Code:** through the `peers channel` MCP server.
 - **Antigravity:** typed into an `agy` TUI running in herdr.
 - **pi:** through the peers extension for pi (`peers pi-extension`).
-- **Muse Code:** typed into a `muse` TUI running in herdr; headless runs use `muse --yolo exec --session-id`.
+- **Muse Code:** typed into a `muse` TUI running in herdr; headless runs use `muse exec --session-id <id> --json --yolo`.
 
 A session that is not live is never run headless by default: its notification waits until it is. `peers send --headless` runs it headless for one turn instead, for when the user asks for that.
 
@@ -76,7 +76,7 @@ Agents use `peers` through the `peers` agent skill, which tells them when to mes
 For a Claude Code session to get notifications as turns, start it with the peers channel:
 
 ```bash
-claude --mcp-config "$(peers channel-config)" --dangerously-load-development-channels server:peers
+claude --mcp-config "$(peers channel-config)"
 ```
 
 A Claude Code session started without it, such as one in the desktop app, only sees queued messages in `peers chats`; run it in herdr with the channel instead.
