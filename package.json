@@ -1,6 +1,6 @@
 {
   "name": "peers",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Inbox messenger between agent sessions in one herdr workspace: store a message, notify the peer with one herdr agent prompt turn.",

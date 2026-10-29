@@ -115,7 +115,8 @@ export function sessionDir(kind_cwd: string | null): string {
 }
 
 const NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
-const PANE_RE = /^w\d+:p\d+$/;
+// Herdr ids are opaque and alphanumeric: workspaces run w1, w20, w31 and w3G, w3H, w2T alike.
+const PANE_RE = /^w[0-9a-z]+:p[0-9a-z]+$/i;
 
 /** Validates a send target. Returns the reason when it is not one. */
 export function checkTarget(s: string): string | null {

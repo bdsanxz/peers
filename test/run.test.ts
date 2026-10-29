@@ -13,6 +13,7 @@ const AGENTS = {
       { agent: "muse", name: "lead", pane_id: "w9:p1", agent_status: "done", cwd: "/tmp/x", workspace_id: "w9" },
       { agent: "muse", name: "api", pane_id: "w9:p2", agent_status: "working", cwd: "/tmp/x", workspace_id: "w9" },
       { agent: "muse", name: "flaky", pane_id: "w9:p3", agent_status: "idle", cwd: "/tmp/x", workspace_id: "w9" },
+      { agent: "muse", pane_id: "w3G:p7", agent_status: "idle", cwd: "/tmp/x", workspace_id: "w3G" },
     ],
   },
 };
@@ -120,6 +121,14 @@ describe("peers over herdr agent prompt", () => {
     expect(r.err).toContain("stored in flaky's inbox, but its notification failed");
     const inbox = cli(s, ["chats"], { PEERS_SELF: "flaky", HERDR_PANE_ID: "" });
     expect(inbox.out).toContain("1 unread message");
+  });
+
+  test("alphanumeric pane ids are accepted as targets", () => {
+    const s = setup();
+    const r = cli(s, ["send", "w3G:p7", "--kind", "notice", "--seq", "1", "--body", "Hi."]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT w3G:p7: stored in its inbox (1 unread message)");
+    expect(prompts(s)).toContain("agent prompt w3G:p7 New message");
   });
 
   test("legacy runtime:id addresses are rejected with a hint", () => {
