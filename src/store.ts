@@ -172,6 +172,9 @@ export class Store {
       throw new Error(`cannot open ${path.join(dir, "bd.sql")}: ${e instanceof Error ? e.message : String(e)}`);
     }
     db.exec("PRAGMA journal_mode = WAL;");
+    // Several sessions notify and read at once; wait on a locked database
+    // instead of failing the send with SQLITE_BUSY.
+    db.exec("PRAGMA busy_timeout = 10000;");
     db.exec(SCHEMA);
     return new Store(db, root, dir);
   }

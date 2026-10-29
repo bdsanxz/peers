@@ -104,6 +104,13 @@ download "$URL" "$TMP/$ASSET"
 download "$SUM_URL" "$TMP/$ASSET.sha256"
 (cd "$TMP" && sha256sum -c "$ASSET.sha256" >/dev/null) || die "checksum mismatch"
 chmod +x "$TMP/$ASSET"
+# Point the script at the absolute bun path so it also runs in non-login shells whose PATH lacks bun.
+BUN_BIN="$(command -v bun || true)"
+if [ -n "$BUN_BIN" ]; then
+  sed -i.bak "1s|.*|#!$BUN_BIN|" "$TMP/$ASSET" && rm -f "$TMP/$ASSET.bak"
+else
+  say "warning: bun is not on PATH; install it (https://bun.sh) for peers to run"
+fi
 mv "$TMP/$ASSET" "$OUT"
 say "installed $OUT"
 "$OUT" --version

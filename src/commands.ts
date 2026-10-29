@@ -16,8 +16,8 @@ Usage: peers [--squad <dir>] <command> [options]
 
 Commands:
   whoami     Print this session's member address
-  list       List live herdr agents
-  send       Store one message in a chat, then notify the peer with one herdr agent prompt
+  list       List live agents (old herdr and herdr-core terminals)
+  send       Store one message in a chat, then notify the peer (herdr prompt, else hc send)
   contacts   List every peer profile in the squad's database, with its status
   chats      List your chats with their unread counts (also: peers inbox)
   open       Print one page of a chat
@@ -31,8 +31,9 @@ How it works:
   3. The answer reaches you the same way, as a new turn. Nobody polls.
 
 Addresses:
-  A peer's address is its herdr member name (such as "lead"), or its pane id
-  (such as "w1:p1") wherever a name does. Find them with \`peers list\`.
+  A peer's address is its member name (such as "lead"), its pane id
+  (such as "w1:p1") or its herdr-core terminal (such as "t2") wherever
+  a name does. Find them with \`peers list\`.
 
 For agents:
   - After a send, end your turn: never sleep, poll, loop or re-open to wait for the answer.
@@ -46,8 +47,8 @@ Storage:
   --squad <dir>   use that squad's database instead
 
 Environment:
-  PEERS_SELF              your address, when herdr cannot tell it
-  PEERS_CWD               your session directory, when herdr cannot tell it
+  PEERS_SELF              your address, when neither hc nor herdr can tell it
+  PEERS_CWD               your session directory, when neither can tell it
   PEERS_ROLE, PEERS_NAME  your role and name in the messages you send; a name without the role
   PEERS_CACHE             another cache root instead of ~/.local/cache/peers
 
@@ -69,15 +70,16 @@ Output:
 
 Identity, first match wins:
   PEERS_SELF=<address>  overrides everything below
-  HERDR_PANE_ID         matched against \`herdr agent list\`
+  HERDR_PANE_ID         matched against old herdr agents
+  HC_TERMINAL_ID        matched against herdr-core terminals
 
 Notes:
   - Also records your profile, so your squad sees you in \`peers contacts\`.
-  - Exit 2 outside a herdr agent session with no PEERS_SELF.
+  - Exit 2 outside a live agent session with no PEERS_SELF.
 
 Examples:
   peers whoami`,
-  list: `peers list — list live herdr agents
+  list: `peers list — list live agents
 
 Usage: peers list
 
@@ -86,7 +88,8 @@ Output:
   one line per live agent; nothing when none matches
 
 Notes:
-  - Asks herdr, not the peers database: it shows live agents, including ones that never used peers.
+  - Asks old herdr and herdr-core (hc), not the peers database: it shows
+    live agents, including ones that never used peers.
   - Never lists your own session.
 
 Examples:
@@ -108,9 +111,11 @@ Kinds:
   receipt      closes the exchange: OK, or NO and why; never answered
   notice       information that needs no work; answered by a receipt
 
-Notification, one route for every peer:
-  The message is stored, then delivered with one fire-and-forget
-  \`herdr agent prompt <target> <notification>\`: no --wait, no polling.
+Notification, one fire-and-forget turn for every peer:
+  The message is stored, then delivered with one
+  \`herdr agent prompt <target> <notification>\`, falling back to
+  \`hc send <target> <notification>\` when the old server is stopped:
+  no --wait, no polling.
   A peer that is not live gets the line \`queued, not delivered yet: <reason>\`:
   the message waits in its inbox until it runs and the next message arrives,
   when the notification carries every waiting message's count.

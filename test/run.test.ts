@@ -18,21 +18,29 @@ const AGENTS = {
   },
 };
 
-function setup(): { tmp: string; bin: string; prompts: string; squad: string } {
+function setup(): { tmp: string; bin: string; prompts: string; hcPrompts: string; squad: string } {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "peers-test-"));
   const bin = path.join(tmp, "bin");
   fs.mkdirSync(bin, { recursive: true });
   const squad = path.join(tmp, "squad");
   fs.mkdirSync(squad, { recursive: true });
   fs.writeFileSync(path.join(tmp, "agents.json"), JSON.stringify(AGENTS));
+  fs.writeFileSync(path.join(tmp, "hc.json"), JSON.stringify({ terminals: [] }));
   const stub = `#!/bin/bash
 if [ "$1 $2" = "agent list" ]; then cat "${tmp}/agents.json"; exit 0; fi
-if [ "$1 $2" = "agent prompt" ]; then printf '%s\\n' "$*" >>"${tmp}/prompts.log"; [ "$3" = "flaky" ] && { echo "no such agent: flaky" >&2; exit 1; }; exit 0; fi
+if [ "$1 $2" = "agent prompt" ]; then printf '%s\\n' "$*" >>"${tmp}/prompts.log"; [ "$3" = "flaky" ] && { echo "no such agent: flaky" >&2; exit 1; }; grep -q server_not_running "${tmp}/agents.json" 2>/dev/null && { echo "no herdr server is running" >&2; exit 1; }; exit 0; fi
 echo "unexpected herdr call: $*" >&2; exit 9
 `;
   fs.writeFileSync(path.join(bin, "herdr"), stub);
   fs.chmodSync(path.join(bin, "herdr"), 0o755);
-  return { tmp, bin, prompts: path.join(tmp, "prompts.log"), squad };
+  const hcStub = `#!/bin/bash
+if [ "$1" = "ls" ]; then cat "${tmp}/hc.json"; exit 0; fi
+if [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${tmp}/hc-prompts.log"; [ "$2" = "flaky" ] && { echo "no such terminal: flaky" >&2; exit 1; }; [ "$2" = "ghost" ] && { echo "no such terminal: ghost" >&2; exit 1; }; exit 0; fi
+echo "unexpected hc call: $*" >&2; exit 9
+`;
+  fs.writeFileSync(path.join(bin, "hc"), hcStub);
+  fs.chmodSync(path.join(bin, "hc"), 0o755);
+  return { tmp, bin, prompts: path.join(tmp, "prompts.log"), hcPrompts: path.join(tmp, "hc-prompts.log"), squad };
 }
 
 function cli(
@@ -47,6 +55,7 @@ function cli(
       PEERS_CACHE: path.join(s.tmp, "cache"),
       HOME: path.join(s.tmp, "home"),
       HERDR_PANE_ID: "w9:p9",
+      HC_TERMINAL_ID: "",
       PEERS_CWD: s.squad,
       ...extraEnv,
     },
@@ -135,7 +144,7 @@ describe("peers over herdr agent prompt", () => {
     const s = setup();
     const r = cli(s, ["send", "claude:aaaaaaaa-0000-0000-0000-000000000000", "--kind", "request", "--seq", "1", "--body", "Hi."]);
     expect(r.code).toBe(2);
-    expect(r.err).toContain("peers addresses are herdr member names");
+    expect(r.err).toContain("peers addresses are member names");
   });
 
   test("sending to yourself is refused", () => {
@@ -164,5 +173,70 @@ describe("peers over herdr agent prompt", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("queued, not delivered yet");
     expect(r.out).toContain("REPLACED: old no longer runs, and api holds its role (qa) now");
+  });
+
+  test("hc terminals list alongside herdr agents", () => {
+    const s = setup();
+    fs.writeFileSync(
+      ((): string => (s as unknown as { tmp: string }).tmp + "/hc.json")(),
+      JSON.stringify({ terminals: [{ address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" }] }),
+    );
+    const list = cli(s, ["list"]);
+    expect(list.code).toBe(0);
+    expect(list.out).toContain("lead  kind=muse");
+    expect(list.out).toContain("t2  kind=muse");
+  });
+
+  test("hc send notifies when the old server is stopped", () => {
+    const s = setup();
+    fs.writeFileSync((s as unknown as { tmp: string }).tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      (s as unknown as { tmp: string }).tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+          { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+        ],
+      }),
+    );
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi hc."], {
+      HERDR_PANE_ID: "",
+      HC_TERMINAL_ID: "t9",
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("notified via hc send to t2");
+    const logged = fs.readFileSync((s as unknown as { hcPrompts: string }).hcPrompts, "utf8");
+    expect(logged).toContain("send t2 New message from t9 (unassigned).");
+  });
+
+  test("whoami resolves the hc terminal by id", () => {
+    const s = setup();
+    fs.writeFileSync(
+      (s as unknown as { tmp: string }).tmp + "/hc.json",
+      JSON.stringify({ terminals: [{ address: "t7", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" }] }),
+    );
+    const r = cli(s, ["whoami"], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t7" });
+    expect(r.code).toBe(0);
+    expect(r.out).toBe("t7");
+  });
+
+  test("remote hc addresses validate as machine/terminal", () => {
+    const s = setup();
+    fs.writeFileSync((s as unknown as { tmp: string }).tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      (s as unknown as { tmp: string }).tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+          { address: "vps/t7", agent: "muse", cwd: "/srv/x", state: "live", status: "idle", where: "remote" },
+        ],
+      }),
+    );
+    const r = cli(s, ["send", "vps/t7", "--kind", "notice", "--seq", "1", "--body", "Hi remote."], {
+      HERDR_PANE_ID: "",
+      HC_TERMINAL_ID: "t9",
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT vps/t7");
   });
 });
