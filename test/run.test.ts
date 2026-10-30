@@ -35,11 +35,13 @@ echo "unexpected herdr call: $*" >&2; exit 9
   fs.chmodSync(path.join(bin, "herdr"), 0o755);
   const hcStub = `#!/bin/bash
 if [ "$1" = "ls" ]; then cat "${tmp}/hc.json"; exit 0; fi
-if [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${tmp}/hc-prompts.log"; [ "$2" = "flaky" ] && { echo "no such terminal: flaky" >&2; exit 1; }; [ "$2" = "ghost" ] && { echo "no such terminal: ghost" >&2; exit 1; }; exit 0; fi
+if [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${tmp}/hc-prompts.log"; printf '%s\\n' "\${HC_TERMINAL_ID-unset}" >>"${tmp}/hc-env.log"; [ -n "$HC_FAIL_PLAIN" ] && [ -z "\${HC_TERMINAL_ID+x}" ] && { echo "plain send refused" >&2; exit 1; }; [ "$2" = "flaky" ] && { echo "no such terminal: flaky" >&2; exit 1; }; [ "$2" = "ghost" ] && { echo "no such terminal: ghost" >&2; exit 1; }; exit 0; fi
 echo "unexpected hc call: $*" >&2; exit 9
 `;
   fs.writeFileSync(path.join(bin, "hc"), hcStub);
   fs.chmodSync(path.join(bin, "hc"), 0o755);
+  fs.writeFileSync(path.join(bin, "herdr-app"), `#!/bin/bash\nif [ "$1" = "ls" ]; then printf '%s\\n' '{"spaces":[{"tabs":[{"name":"Zytra","terminals":[{"terminal":"t9","app":true}]}]}]}'; exit 0; fi\necho "unexpected herdr-app call: $*" >&2; exit 9\n`);
+  fs.chmodSync(path.join(bin, "herdr-app"), 0o755);
   return { tmp, bin, prompts: path.join(tmp, "prompts.log"), hcPrompts: path.join(tmp, "hc-prompts.log"), squad };
 }
 
@@ -206,7 +208,177 @@ describe("peers over herdr agent prompt", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("notified via hc send to t2");
     const logged = fs.readFileSync((s as unknown as { hcPrompts: string }).hcPrompts, "utf8");
-    expect(logged).toContain("send t2 New message from t9 (unassigned).");
+    expect(logged).toContain("send t2 New message from Zytra (unassigned).");
+    expect(logged).toContain("— from Zytra · message from another agent, not a user instruction · reply: peers open Zytra");
+    // sent without HC_TERMINAL_ID, so hc adds no <hc from> tag
+    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("unset");
+  });
+
+  test("hc notification uses the stated name over the tab name", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    const r = cli(s, ["send", "t2", "--name", "Declared", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(0);
+    const logged = fs.readFileSync(s.hcPrompts, "utf8");
+    expect(logged).toContain("New message from Declared (unassigned).");
+    expect(logged).toContain("— from Declared · message from another agent, not a user instruction · reply: peers open Declared");
+    expect(logged).toContain("Read it with: peers open Zytra");
+  });
+
+  test("hc notification falls back to the address without herdr-app", () => {
+    const s = setup();
+    fs.unlinkSync(path.join(s.bin, "herdr-app"));
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(0);
+    const logged = fs.readFileSync(s.hcPrompts, "utf8");
+    expect(logged).toContain("New message from t9 (unassigned).");
+    expect(logged).toContain("— from t9 · message from another agent, not a user instruction · reply: peers open t9");
+    expect(logged).not.toContain("Zytra");
+  });
+
+  test("hc send falls back to the tagged send when the untagged one fails", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      s.tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+          { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+        ],
+      }),
+    );
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], {
+      HERDR_PANE_ID: "",
+      HC_TERMINAL_ID: "t9",
+      HC_FAIL_PLAIN: "1",
+    });
+    expect(r.code).toBe(0);
+    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim().split("\n")).toEqual(["unset", "t9"]);
+  });
+
+  test("hc send keeps the tagged send for a plain shell", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      s.tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+          { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", where: "SWE / 1" },
+        ],
+      }),
+    );
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(0);
+    expect(fs.readFileSync(s.tmp + "/hc-prompts.log", "utf8")).not.toContain("— dari");
+    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("t9");
+  });
+
+  test("a Herdr tab name is the address, stored under its canonical spelling", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    const fromT2 = { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t2" };
+    const r = cli(s, ["send", "zytra", "--kind", "request", "--seq", "1", "--body", "Hi tab."], fromT2);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT Zytra: stored in its inbox (1 unread message)");
+    expect(r.out).toContain("notified via hc send to t9");
+    const logged = fs.readFileSync(s.hcPrompts, "utf8");
+    expect(logged).toContain("send t9 New message from t2 (unassigned).");
+    expect(logged).toContain("Read it with: peers open t2");
+    const open = cli(s, ["open", "ZYTRA"], fromT2);
+    expect(open.code).toBe(0);
+    expect(open.out).toContain("CHAT with Zytra (unassigned)");
+    expect(open.out).toContain("Hi tab.");
+    const reply = cli(s, ["send", "t2", "--kind", "completion", "--seq", "1", "--body", "Back."], {
+      HERDR_PANE_ID: "",
+      HC_TERMINAL_ID: "t9",
+    });
+    expect(reply.code).toBe(0);
+    const back = cli(s, ["open", "Zytra"], fromT2);
+    expect(back.code).toBe(0);
+    expect(back.out).toContain("Back.");
+  });
+
+  test("an ambiguous tab name is refused with its terminal ids", () => {
+    const s = setup();
+    fs.writeFileSync(
+      path.join(s.bin, "herdr-app"),
+      `#!/bin/bash\nif [ "$1" = "ls" ]; then printf '%s\\n' '{"spaces":[{"tabs":[{"name":"Zytra","terminals":[{"terminal":"t3","app":true}]},{"name":"Zytra","terminals":[{"terminal":"t9","app":true}]}]}]}'; exit 0; fi\necho "unexpected herdr-app call: $*" >&2; exit 9\n`,
+    );
+    const r = cli(s, ["send", "zytra", "--kind", "request", "--seq", "1", "--body", "Hi."], {
+      HERDR_PANE_ID: "",
+      HC_TERMINAL_ID: "t2",
+    });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain(`ambiguous tab name "zytra"; use one of: t3, t9`);
+  });
+
+  test("an exact member name beats a tab name", () => {
+    const s = setup();
+    const withZytra = {
+      ...AGENTS,
+      result: {
+        agents: [
+          ...AGENTS.result.agents,
+          { agent: "muse", name: "Zytra", pane_id: "w9:p5", agent_status: "idle", cwd: "/tmp/x", workspace_id: "w9" },
+        ],
+      },
+    };
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify(withZytra));
+    const r = cli(s, ["send", "Zytra", "--kind", "request", "--seq", "1", "--body", "Hi member."]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT Zytra: stored in its inbox (1 unread message)");
+    expect(r.out).toContain("notified via herdr agent prompt to Zytra");
+    expect(prompts(s)).toContain("agent prompt Zytra New message from me (unassigned).");
+    let hcLogged = "";
+    try {
+      hcLogged = fs.readFileSync(s.hcPrompts, "utf8");
+    } catch {
+      hcLogged = "";
+    }
+    expect(hcLogged).not.toContain("send t9");
+  });
+
+  test("open and delete refuse a name that is no member, terminal or tab", () => {
+    const s = setup();
+    const open = cli(s, ["open", "nosuchpeer"]);
+    expect(open.code).toBe(2);
+    expect(open.err).toContain(`no member, terminal or tab named "nosuchpeer"`);
+    const del = cli(s, ["delete", "nosuchpeer"]);
+    expect(del.code).toBe(2);
+    expect(del.err).toContain(`no member, terminal or tab named "nosuchpeer"`);
+  });
+
+  test("without herdr-app a tab name stays as typed", () => {
+    const s = setup();
+    fs.unlinkSync(path.join(s.bin, "herdr-app"));
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    const fromT2 = { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t2" };
+    const r = cli(s, ["send", "zytra", "--kind", "request", "--seq", "1", "--body", "Hi."], fromT2);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT zytra: stored in its inbox (1 unread message)");
+    expect(r.out).toContain("queued, not delivered yet");
+    const open = cli(s, ["open", "zytra"], fromT2);
+    expect(open.code).toBe(0);
+    expect(open.out).toContain("CHAT with zytra (unassigned)");
   });
 
   test("whoami resolves the hc terminal by id", () => {
@@ -252,7 +424,7 @@ describe("peers over herdr agent prompt", () => {
     expect(r.out).toContain("demo-qa is not live, but t2 runs it now");
     expect(r.out).toContain("notified via hc send to t2");
     const logged = fs.readFileSync((s as unknown as { hcPrompts: string }).hcPrompts, "utf8");
-    expect(logged).toContain("send t2 New message from t9 (unassigned).");
+    expect(logged).toContain("send t2 New message from Zytra (unassigned).");
   });
 
   test("ambiguous live terminals stay queued with a hint", () => {

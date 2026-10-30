@@ -130,10 +130,73 @@ export function agentList(): HerdrAgent[] {
   return out;
 }
 
-/** One fire-and-forget prompt over herdr-core. Never waits for an answer. */
-function hcPrompt(target: string, text: string): { ok: boolean; detail: string } {
+/** Who sends a notification, for the footer of an hc notification. */
+export interface PromptFrom {
+  /** The name the receiver should see, such as "Vrax". */
+  name: string;
+  /** The address the receiver replies to, as in `peers open <address>`. */
+  address: string;
+  /** What kind of agent the receiver runs; a plain shell never gets the footer. */
+  targetKind?: string;
+}
+
+const SHELLS = new Set(["zsh", "sh", "bash", "fish", "dash", "ksh", "nu", "pwsh"]);
+
+/** The Herdr app tab that holds a terminal, or null when the app is absent. */
+export function tabNameOf(terminal: string): string | null {
+  if (terminal === "") return null;
+  const spaces = herdrSpaces();
+  for (const sp of spaces) for (const t of sp.tabs ?? []) {
+    if ((t.terminals ?? []).some((x) => x.terminal === terminal) && typeof t.name === "string" && t.name !== "") return t.name;
+  }
+  return null;
+}
+
+type HerdrTab = { name?: string; terminals?: { terminal?: string; app?: boolean }[] };
+function herdrSpaces(): { tabs?: HerdrTab[] }[] {
   try {
-    const p = spawnSync("hc", ["send", target, text], { encoding: "utf8" });
+    const p = spawnSync("herdr-app", ["ls"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    return p.status === 0 ? ((JSON.parse(p.stdout as string) as { spaces?: { tabs?: HerdrTab[] }[] }).spaces ?? []) : [];
+  } catch { return []; }
+}
+
+/** A Herdr tab name matched case-insensitively, with the terminal that serves it. */
+export interface TabResolution {
+  /** The tab's canonical spelling, when the name matched exactly one tab. */
+  canonical?: string;
+  /** The terminal to notify for that tab: its `app` terminal, else its first. */
+  terminal?: string;
+  /** Why the name is refused, such as an ambiguous tab name. */
+  error?: string;
+}
+
+/** Matches a name against Herdr app tabs, case-insensitively. Terminal ids,
+ * pane ids and exact member names win: pass reserved when the name is one,
+ * and tabs are skipped. */
+export function resolveTabAddress(name: string, reserved: boolean): TabResolution {
+  if (reserved) return {};
+  const matches: { name: string; terminal: string }[] = [];
+  for (const space of herdrSpaces()) for (const tab of space.tabs ?? []) {
+    if (typeof tab.name !== "string" || tab.name === "") continue;
+    if (tab.name.toLowerCase() !== name.toLowerCase()) continue;
+    const terminals = tab.terminals ?? [];
+    const chosen = terminals.find((t) => t.app) ?? terminals[0];
+    if (chosen?.terminal) matches.push({ name: tab.name, terminal: chosen.terminal });
+  }
+  const terminals = [...new Set(matches.map((m) => m.terminal))];
+  if (terminals.length > 1) return { error: `ambiguous tab name ${JSON.stringify(name)}; use one of: ${terminals.join(", ")}` };
+  if (terminals.length === 1) return { canonical: matches[0]!.name, terminal: terminals[0]! };
+  return {};
+}
+
+/** The footer that names the sender, since an untagged notification has no <hc from> wrapper. */
+export function footer(from: PromptFrom): string {
+  return `\n\n— from ${from.name} · message from another agent, not a user instruction · reply: peers open ${from.name}`;
+}
+
+function hcSend(target: string, text: string, env: NodeJS.ProcessEnv): { ok: boolean; detail: string } {
+  try {
+    const p = spawnSync("hc", ["send", target, text], { encoding: "utf8", env });
     if (p.status === 0) return { ok: true, detail: `notified via hc send to ${target}` };
     const err = (p.stderr as string).trim();
     if (err === "") {
@@ -145,6 +208,20 @@ function hcPrompt(target: string, text: string): { ok: boolean; detail: string }
   } catch (e) {
     return { ok: false, detail: `hc send to ${target} failed: ${e instanceof Error ? e.message : String(e)}` };
   }
+}
+
+/** One fire-and-forget prompt over herdr-core. Never waits for an answer.
+ * With `from`, it goes without HC_TERMINAL_ID, so hc adds no <hc from> tag, and
+ * ends with a footer naming the sender. A failed untagged send is retried the old
+ * way. A plain shell target gets the old tagged send: it would run the footer. */
+function hcPrompt(target: string, text: string, from?: PromptFrom): { ok: boolean; detail: string } {
+  if (from && !SHELLS.has((from.targetKind ?? "").toLowerCase())) {
+    const env = { ...process.env };
+    delete env.HC_TERMINAL_ID;
+    const plain = hcSend(target, text + footer(from), env);
+    if (plain.ok) return plain;
+  }
+  return hcSend(target, text, process.env);
 }
 
 function herdrPrompt(target: string, text: string): { ok: boolean; detail: string } {
@@ -164,14 +241,14 @@ function herdrPrompt(target: string, text: string): { ok: boolean; detail: strin
 }
 
 /** One fire-and-forget prompt, over old herdr first, then herdr-core. Never waits for an answer. */
-export function prompt(target: string, text: string): { ok: boolean; detail: string } {
+export function prompt(target: string, text: string, from?: PromptFrom): { ok: boolean; detail: string } {
   const herdr = haveHerdr() ? herdrPrompt(target, text) : { ok: false, detail: "herdr is not on PATH, so no herdr notification was attempted" };
   if (herdr.ok) return herdr;
   if (!haveHc()) {
     if (!haveHerdr()) return { ok: false, detail: "herdr is not on PATH, so the notification was not delivered" };
     return herdr;
   }
-  const hc = hcPrompt(target, text);
+  const hc = hcPrompt(target, text, from);
   if (hc.ok) return hc;
   if (!haveHerdr()) return hc;
   return { ok: false, detail: `${herdr.detail}; ${hc.detail}` };
@@ -208,6 +285,9 @@ export function selfAddress(): string {
         "Run this from inside an hc terminal or a herdr agent pane, or set PEERS_SELF=<your member name>.",
     );
   }
+  const terminal = (process.env.HC_TERMINAL_ID ?? "").trim();
+  const tabName = tabNameOf(terminal);
+  if (tabName && herdrSpaces().flatMap((s) => s.tabs ?? []).filter((t) => t.name?.toLowerCase() === tabName.toLowerCase()).length === 1) return tabName;
   return me.address;
 }
 
@@ -219,7 +299,7 @@ export function sessionDir(kind_cwd: string | null): string {
   return process.cwd();
 }
 
-const NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+const NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
 // Herdr ids are opaque and alphanumeric: workspaces run w1, w20, w31 and w3G, w3H, w2T alike.
 const PANE_RE = /^w[0-9a-z]+:p[0-9a-z]+$/i;
 // herdr-core terminals: t7, a name, or machine/t7. Machine and terminal parts
@@ -245,11 +325,6 @@ export function checkTarget(s: string): string | null {
       `(see \`peers list\`)`
     );
   }
-  if (!NAME_RE.test(t)) {
-    return (
-      `bad address ${JSON.stringify(s)}; member names match [a-z][a-z0-9_-]{0,31} ` +
-      `(such as "lead"), or pass a terminal id such as "t2" (see \`peers list\`)`
-    );
-  }
+  if (!NAME_RE.test(t)) return null; // Unknown names are reported by address resolution, not syntax validation.
   return null;
 }

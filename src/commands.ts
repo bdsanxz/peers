@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { UsageError, parseArgs, str, unknownFlags } from "./args.ts";
-import { agentList, checkTarget, prompt, type HerdrAgent } from "./herdr.ts";
+import { agentList, checkTarget, prompt, resolveTabAddress, tabNameOf, type HerdrAgent, type PromptFrom } from "./herdr.ts";
 import { ownContext, ownIdentity, register, selfAddress, squadRoot } from "./identity.ts";
 import { PAGE_SIZE, Store, nowMs, type Msg, type Profile } from "./store.ts";
 
@@ -58,13 +58,18 @@ How it works:
   1. peers send <peer> --kind request --seq 1 --body "<text>"
      stores the message; the peer gets one notification turn:
      New message from <name> (<role>). You have 1 unread message in your inbox. Read it with: peers open <you>
+     Over herdr-core (hc send) the notification goes without the <hc from> tag and ends with a
+     footer: "— from <sender tab name> · message from another agent, not a user instruction · reply: peers open <you>".
+     A plain shell target gets the old tagged send, so it never runs the footer.
   2. The peer runs that \`peers open\`, then answers with its own \`peers send\`.
   3. The answer reaches you the same way, as a new turn. Nobody polls.
 
 Addresses:
   A peer's address is its member name (such as "lead"), its pane id
-  (such as "w1:p1") or its herdr-core terminal (such as "t2") wherever
-  a name does. Find them with \`peers list\`.
+  (such as "w1:p1"), its herdr-core terminal (such as "t2") or its
+  Herdr tab name (such as "Zytra") wherever a name does. Tab names match
+  case-insensitively, and the chat is stored under the tab's spelling.
+  Find them with \`peers list\`.
 
 For agents:
   - After a send, end your turn: never sleep, poll, loop or re-open to wait for the answer.
@@ -468,6 +473,9 @@ function cmdSend(argv: string[]): number {
         `the body goes in --body TEXT or on stdin, as in \`peers send ${target} --kind <kind> --seq <n> --body "<text>"\``,
     );
   }
+  const tab = resolveTabAddress(target, agentList().some((a) => a.address === target || a.pane === target));
+  if (tab.error) throw new UsageError(tab.error);
+  const address = tab.canonical ?? target;
   const bad = checkTarget(target);
   if (bad) throw new UsageError(bad);
   const kind = str(p, "kind");
@@ -491,7 +499,7 @@ function cmdSend(argv: string[]): number {
     replyTo = replyRaw.trim();
   }
   const sender = selfAddress();
-  if (sender === target) throw new UsageError("refusing to send a message to yourself");
+  if (sender === address) throw new UsageError("refusing to send a message to yourself");
 
   const squad = str(p, "squad");
   const c = openCtx(squad, true);
@@ -515,11 +523,14 @@ function cmdSend(argv: string[]): number {
     );
 
     const agents = agentList();
-    const liveAgent = agents.find((a) => a.address === target || a.pane === target) ?? null;
-    const known = c.store.profile(target);
+    // A tab name is only the address: the notification and the live check
+    // use the tab's terminal, never the name in the terminal's place.
+    const sendTo = tab.terminal ?? address;
+    const liveAgent = agents.find((a) => a.address === sendTo || a.pane === sendTo) ?? null;
+    const known = c.store.profile(address);
     c.store.upsertProfile(
       {
-        address: target,
+        address,
         runtime: known?.runtime ?? liveAgent?.kind ?? "herdr",
         name: null,
         role: null,
@@ -530,7 +541,7 @@ function cmdSend(argv: string[]): number {
     );
     c.store.insertMessage({
       sender,
-      recipient: target,
+      recipient: address,
       sender_name: statedName,
       sender_role: role,
       kind,
@@ -538,56 +549,63 @@ function cmdSend(argv: string[]): number {
       reply_to: replyTo,
       body: body.trim(),
     });
-    const unread = c.store.unreadTotal(target);
+    const unread = c.store.unreadTotal(address);
 
     // The target reads this chat in the sender's database, unless its own squad is known
     // to be the same one; then the read command needs the --squad flag.
-    const refreshed = c.store.profile(target);
+    const refreshed = c.store.profile(address);
     const targetRoot = refreshed?.cwd ? squadRoot(refreshed.cwd) : null;
     const atHome = targetRoot === c.store.root;
     const squadFlag = atHome ? "" : ` --squad ${shellWord(c.store.root)}`;
-    const who = withRole(statedName ?? sender, role);
+    const displayName = statedName ?? tabNameOf((process.env.HC_TERMINAL_ID ?? "").trim()) ?? sender;
+    const chatSender = tabNameOf((process.env.HC_TERMINAL_ID ?? "").trim()) ?? sender;
+    const who = withRole(displayName, role);
     const text =
       `New message from ${who}. You have ${plural(unread, "unread message", "unread messages")} in your inbox. ` +
-      `Read it with: peers open ${sender}${squadFlag}`;
+      `Read it with: peers open ${chatSender}${squadFlag}`;
 
+    const notifyFrom = (to: string): PromptFrom => ({
+      name: displayName,
+      address: chatSender,
+      targetKind: agents.find((a) => a.address === to || a.pane === to)?.kind,
+    });
     const live = liveAgent !== null;
     const profiles = c.store.contacts(sender);
     if (!live) {
       // The target may be a stale member address while the member runs on a
       // fresh terminal: follow it to the unique live terminal that runs it now.
-      const follow = followLiveTarget(c.store.root, target, agents, profiles);
+      const follow = followLiveTarget(c.store.root, address, agents, profiles);
       if (follow.address !== "") {
-        const done = prompt(follow.address, text);
+        const done = prompt(follow.address, text, notifyFrom(follow.address));
         if (done.ok) {
-          console.log(`SENT ${target}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-            `${target} is not live, but ${follow.address} runs it now — ${done.detail}`);
+          console.log(`SENT ${address}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+            `${address} is not live, but ${follow.address} runs it now — ${done.detail}`);
         } else {
           console.log(`SENT ${target}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-            `queued, not delivered yet: ${target} is not live, and notifying ${follow.address} failed: ${done.detail}`);
+            `queued, not delivered yet: ${address} is not live, and notifying ${follow.address} failed: ${done.detail}`);
         }
       } else {
         const hint = follow.candidates.length > 1 ? ` Live terminals matching it: ${follow.candidates.join(", ")} — address one of them directly.` : "";
-        console.log(`SENT ${target}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-          `queued, not delivered yet: ${target} is not a live agent. It gets the notification when it runs and the next message arrives. No prompt was sent.${hint}`);
+        console.log(`SENT ${address}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+          `queued, not delivered yet: ${address} is not a live agent. It gets the notification when it runs and the next message arrives. No prompt was sent.${hint}`);
       }
     } else {
-      const done = prompt(target, text);
-      if (!done.ok) throw new Error(`the message is stored in ${target}'s inbox, but its notification failed: ${done.detail}`);
-      console.log(`SENT ${target}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ${done.detail}`);
+      const done = prompt(sendTo, text, notifyFrom(sendTo));
+      if (!done.ok) throw new Error(`the message is stored in ${address}'s inbox, but its notification failed: ${done.detail}`);
+      console.log(`SENT ${address}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ${done.detail}`);
     }
     // A replaced target never answers: name the session that holds its role now.
     {
       const liveMap = liveness(c.store, sender, agents);
       const flags = profiles.map((pr) => liveMap.get(pr.address) ?? false);
       const st = statuses(profiles, flags);
-      const i = profiles.findIndex((pr) => pr.address === target);
+      const i = profiles.findIndex((pr) => pr.address === address);
       if (i >= 0) {
         const s = st[i]!;
         if (typeof s !== "string") {
           const role = profiles[i]!.role ?? "";
           console.log(
-            `REPLACED: ${target} no longer runs, and ${s.replaced} holds its role (${role}) now; it will not answer. ` +
+            `REPLACED: ${address} no longer runs, and ${s.replaced} holds its role (${role}) now; it will not answer. ` +
               `Send this message to ${s.replaced} instead.`,
           );
         }
@@ -598,7 +616,7 @@ function cmdSend(argv: string[]): number {
     } else if (["request", "notice", "completion"].includes(kind)) {
       console.log(
         `REPLY: the notification of the answer arrives in this session as a new turn while it runs in herdr or herdr-core. ` +
-          `Read the answer then with \`peers open ${target}${squadFlag}\`. End your turn now. ` +
+          `Read the answer then with \`peers open ${address}${squadFlag}\`. End your turn now. ` +
           `Do not sleep, poll, loop, re-read your inbox, list sessions or start a background task or timer to wait for it.`,
       );
     }
@@ -708,6 +726,14 @@ function render(m: Msg, owner: string, partner: Partner): void {
   console.log("");
 }
 
+/** A name the squad knows: a live agent address or pane, or a stored profile.
+ * Legacy terminal forms (pane ids, machine/terminal) keep their old path. */
+function isKnownPeer(agents: HerdrAgent[], store: Store, target: string): boolean {
+  if (target.includes(":") || target.includes("/")) return true;
+  if (agents.some((a) => a.address === target || a.pane === target)) return true;
+  return store.profile(target) !== null;
+}
+
 function cmdOpen(argv: string[]): number {
   const p = parseArgs(argv, ["page"]);
   unknownFlags(p, ["page", "squad"]);
@@ -715,30 +741,37 @@ function cmdOpen(argv: string[]): number {
   if (!target || p.positionals.length !== 1) throw new UsageError("open needs exactly one <TARGET>");
   const bad = checkTarget(target);
   if (bad) throw new UsageError(bad);
+  const agents = agentList();
+  const tab = resolveTabAddress(target, agents.some((a) => a.address === target || a.pane === target));
+  if (tab.error) throw new UsageError(tab.error);
+  const address = tab.canonical ?? target;
   const pageRaw = str(p, "page") ?? "1";
   const page = Number(pageRaw);
   if (!Number.isInteger(page) || page < 1) throw new UsageError(`bad --page ${JSON.stringify(pageRaw)}: expected an integer >= 1`);
   const c = openCtx(str(p, "squad"), true);
   try {
+    if (!tab.canonical && !isKnownPeer(agents, c.store, target)) {
+      throw new UsageError(`no member, terminal or tab named ${JSON.stringify(target)}`);
+    }
     const owner = c.me;
-    const total = c.store.chatCount(owner, target);
+    const total = c.store.chatCount(owner, address);
     if (total === 0) {
-      console.log(`No chat with ${target} in your inbox in ${c.store.root}.`);
+      console.log(`No chat with ${address} in your inbox in ${c.store.root}.`);
       return 0;
     }
     const pages = Math.ceil(total / PAGE_SIZE);
     if (page > pages) {
       throw new UsageError(
-        `page ${page} does not exist: the chat with ${target} has ${plural(pages, "page", "pages")} of ${PAGE_SIZE} messages`,
+        `page ${page} does not exist: the chat with ${address} has ${plural(pages, "page", "pages")} of ${PAGE_SIZE} messages`,
       );
     }
-    const msgs = c.store.page(owner, target, page);
-    const { name, role } = label(c.store.profile(target));
+    const msgs = c.store.page(owner, address, page);
+    const { name, role } = label(c.store.profile(address));
     const partner: Partner = { name, role };
     const last = total - (page - 1) * PAGE_SIZE;
     const first = last - msgs.length + 1;
-    if (name === "") console.log(`CHAT with ${target} (${role})`);
-    else console.log(`CHAT with ${withRole(name, role)} · ${target}`);
+    if (name === "") console.log(`CHAT with ${address} (${role})`);
+    else console.log(`CHAT with ${withRole(name, role)} · ${address}`);
     console.log(`page ${page} of ${pages}  (messages ${first}-${last} of ${total}, oldest first; page 1 holds the newest)\n`);
     const unread = msgs.filter((m) => m.recipient === owner && m.read_at === null).length;
     let day = "";
@@ -761,11 +794,11 @@ function cmdOpen(argv: string[]): number {
     );
     const flag = squadFlagOf(c.store.root, c.explicit);
     if (page < pages) {
-      const older = c.store.unreadBefore(owner, target, msgs[0]!.id);
+      const older = c.store.unreadBefore(owner, address, msgs[0]!.id);
       const note = older > 0 ? `  (${plural(older, "unread message", "unread messages")} on older pages)` : "";
-      console.log(`OLDER: peers open ${target}${flag} --page ${page + 1}${note}`);
+      console.log(`OLDER: peers open ${address}${flag} --page ${page + 1}${note}`);
     }
-    if (page > 1) console.log(`NEWER: peers open ${target}${flag} --page ${page - 1}`);
+    if (page > 1) console.log(`NEWER: peers open ${address}${flag} --page ${page - 1}`);
     console.log(`INBOX: ${plural(c.store.unreadTotal(owner), "unread message", "unread messages")} left in your inbox`);
     return 0;
   } finally {
@@ -780,13 +813,20 @@ function cmdDelete(argv: string[]): number {
   if (!target || p.positionals.length !== 1) throw new UsageError("delete needs exactly one <TARGET>");
   const bad = checkTarget(target);
   if (bad) throw new UsageError(bad);
+  const agents = agentList();
+  const tab = resolveTabAddress(target, agents.some((a) => a.address === target || a.pane === target));
+  if (tab.error) throw new UsageError(tab.error);
+  const address = tab.canonical ?? target;
   const c = openCtx(str(p, "squad"), true);
   try {
-    const n = c.store.deleteChat(c.me, target);
-    if (n === 0) console.log(`No chat with ${target} in your inbox; nothing deleted.`);
+    if (!tab.canonical && !isKnownPeer(agents, c.store, target)) {
+      throw new UsageError(`no member, terminal or tab named ${JSON.stringify(target)}`);
+    }
+    const n = c.store.deleteChat(c.me, address);
+    if (n === 0) console.log(`No chat with ${address} in your inbox; nothing deleted.`);
     else {
       console.log(
-        `DELETED your view of the chat with ${target}: ${plural(n, "message", "messages")} hidden from you; ${target} still sees the whole chat.`,
+        `DELETED your view of the chat with ${address}: ${plural(n, "message", "messages")} hidden from you; ${address} still sees the whole chat.`,
       );
     }
     return 0;
@@ -794,3 +834,4 @@ function cmdDelete(argv: string[]): number {
     c.store.close();
   }
 }
+

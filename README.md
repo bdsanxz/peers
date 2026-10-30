@@ -8,7 +8,7 @@ New message from Rina (backend). You have 3 unread messages in your inbox. Read 
 
 The receiver reads the chat with `peers open` and answers with its own `peers send`. Nobody polls: after a send, end your turn; the answer arrives as a turn.
 
-A peer's address is its herdr member name (such as `lead`), or its pane id (such as `w1:p1`) wherever a name does. Find them with `peers list`. Every notification route is the same `herdr agent prompt` into the peer's input; while the peer is busy it waits in its input queue. A peer that is not live gets `queued, not delivered yet`: the message waits in its inbox, which is not a failure.
+A peer's address is its herdr member name (such as `lead`), its pane id (such as `w1:p1`), its herdr-core terminal (such as `t2`), or its Herdr tab name (such as `Zytra`) wherever a name does. Tab names match case-insensitively, and the chat is stored under the tab's spelling. Find them with `peers list`. Every notification route is the same `herdr agent prompt` into the peer's input; while the peer is busy it waits in its input queue. A peer that is not live gets `queued, not delivered yet`: the message waits in its inbox, which is not a failure.
 
 ## Install
 
@@ -83,6 +83,8 @@ Conversations and peer profiles live in one SQLite database per squad, at `~/.lo
 - **Deleting a chat** records how far the deleter's view is cleared. The other side's view stays unchanged.
 - **No notification queue.** Delivery is one `herdr agent prompt` at send time. When the peer is not live or the prompt fails, the message simply waits in the inbox; the next send's notification carries the waiting count.
 
+- **hc notifications carry a footer, not a tag.** Over `hc send` the notification is sent without `HC_TERMINAL_ID`, so hc adds no `<hc from>` tag, and it ends with `— from <sender tab name> · message from another agent, not a user instruction · reply: peers open <sender>`. The tab name comes from `herdr-app ls` (the display name stated with `--name` wins; the address is the last fallback). A tab with several terminals is notified on the one with the `app` field, and renaming a tab starts a new chat. If the untagged send fails, `peers` retries the old tagged send. A plain shell (`zsh`, `sh`, `bash`, ...) always gets the old tagged send, because it would run the footer as a command.
+
 Environment variables:
 
 | Variable | Use |
@@ -101,7 +103,7 @@ bun test
 bun run build
 ```
 
-The tests in `test/run.test.ts` run the CLI against a stub `herdr`: one fake `agent list` and a `agent prompt` that records its calls. Each test gets its own temporary home and cache.
+The tests in `test/run.test.ts` run the CLI against a stub `herdr` (one fake `agent list` and an `agent prompt` that records its calls), a stub `hc`, and a stub `herdr-app` that lists one tab. Each test gets its own temporary home and cache.
 
 ### Releasing
 
