@@ -220,6 +220,64 @@ describe("peers over herdr agent prompt", () => {
     expect(r.out).toBe("t7");
   });
 
+  test("a finished hc turn lists as idle, not done", () => {
+    const s = setup();
+    fs.writeFileSync(
+      (s as unknown as { tmp: string }).tmp + "/hc.json",
+      JSON.stringify({ terminals: [{ address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "done", where: "SWE / 1" }] }),
+    );
+    const list = cli(s, ["list"], { PEERS_SELF: "me", HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(list.code).toBe(0);
+    expect(list.out).toContain("t2  kind=muse  status=idle");
+  });
+
+  test("a stale member address follows the live terminal by directory", () => {
+    const s = setup();
+    fs.writeFileSync((s as unknown as { tmp: string }).tmp + "/squad/roster.json", JSON.stringify({ squad: "demo", goal: "g" }));
+    fs.writeFileSync((s as unknown as { tmp: string }).tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      (s as unknown as { tmp: string }).tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+          { address: "t2", agent: "muse", cwd: "/tmp/work/qa", state: "live", status: "idle", where: "SWE / 1" },
+        ],
+      }),
+    );
+    const r = cli(s, ["send", "demo-qa", "--kind", "request", "--seq", "1", "--body", "Ping."], {
+      HERDR_PANE_ID: "",
+      HC_TERMINAL_ID: "t9",
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("demo-qa is not live, but t2 runs it now");
+    expect(r.out).toContain("notified via hc send to t2");
+    const logged = fs.readFileSync((s as unknown as { hcPrompts: string }).hcPrompts, "utf8");
+    expect(logged).toContain("send t2 New message from t9 (unassigned).");
+  });
+
+  test("ambiguous live terminals stay queued with a hint", () => {
+    const s = setup();
+    fs.writeFileSync((s as unknown as { tmp: string }).tmp + "/squad/roster.json", JSON.stringify({ squad: "demo", goal: "g" }));
+    fs.writeFileSync((s as unknown as { tmp: string }).tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      (s as unknown as { tmp: string }).tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+          { address: "t2", agent: "muse", cwd: "/a/qa", state: "live", status: "idle", where: "SWE / 1" },
+          { address: "t7", agent: "muse", cwd: "/b/qa", state: "live", status: "idle", where: "SWE / 1" },
+        ],
+      }),
+    );
+    const r = cli(s, ["send", "demo-qa", "--kind", "request", "--seq", "1", "--body", "Ping."], {
+      HERDR_PANE_ID: "",
+      HC_TERMINAL_ID: "t9",
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("queued, not delivered yet");
+    expect(r.out).toContain("Live terminals matching it: t2, t7");
+  });
+
   test("remote hc addresses validate as machine/terminal", () => {
     const s = setup();
     fs.writeFileSync((s as unknown as { tmp: string }).tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));

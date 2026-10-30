@@ -77,16 +77,19 @@ export function hcAgentList(): HerdrAgent[] {
     const name = rec["name"];
     if (typeof id !== "string" || id === "") continue;
     const named = typeof name === "string" && name !== "" ? name : id;
+    let state =
+      typeof rec["status"] === "string" && (rec["status"] as string) !== ""
+        ? (rec["status"] as string)
+        : typeof rec["state"] === "string"
+          ? (rec["state"] as string)
+          : "?";
+    // Every terminal listed here is live; a finished turn means idle, not dead.
+    if (state === "done") state = "idle";
     out.push({
       address: named,
       pane: id,
       kind: typeof rec["agent"] === "string" && (rec["agent"] as string) !== "" ? (rec["agent"] as string) : "herdr",
-      state:
-        typeof rec["status"] === "string" && (rec["status"] as string) !== ""
-          ? (rec["status"] as string)
-          : typeof rec["state"] === "string"
-            ? (rec["state"] as string)
-            : "?",
+      state,
       cwd: typeof rec["cwd"] === "string" ? (rec["cwd"] as string) : "",
       workspace: typeof rec["where"] === "string" ? (rec["where"] as string) : "",
     });

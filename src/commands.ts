@@ -7,6 +7,37 @@ import { agentList, checkTarget, prompt, type HerdrAgent } from "./herdr.ts";
 import { ownContext, ownIdentity, register, selfAddress, squadRoot } from "./identity.ts";
 import { PAGE_SIZE, Store, nowMs, type Msg, type Profile } from "./store.ts";
 
+/** Follow a stale member address to the live terminal that runs it now.
+ * After a relaunch, sessions live under fresh terminal ids while chats keep
+ * the stable member address. Returns the unique live terminal whose recorded
+ * role or working directory names the member (plus every candidate, for the
+ * hint when they are not unique). */
+function followLiveTarget(
+  root: string,
+  target: string,
+  agents: HerdrAgent[],
+  profiles: Profile[],
+): { address: string; candidates: string[] } {
+  const names = new Set<string>([target]);
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(root, "roster.json"), "utf8")) as { squad?: unknown };
+    if (typeof raw.squad === "string" && raw.squad !== "" && target.startsWith(`${raw.squad}-`)) {
+      names.add(target.slice(raw.squad.length + 1));
+    }
+  } catch {
+    /* no roster: match on the target as-is */
+  }
+  const roleOf = new Map(profiles.map((pr) => [pr.address, pr.role ?? null]));
+  const hits: string[] = [];
+  for (const a of agents) {
+    const dir = a.cwd.split("/").pop() ?? "";
+    if ([...names].some((n) => roleOf.get(a.address) === n)) hits.push(a.address);
+    else if (dir !== "" && names.has(dir)) hits.push(a.address);
+  }
+  const uniq = [...new Set(hits)];
+  return { address: uniq.length === 1 ? uniq[0]! : "", candidates: uniq };
+}
+
 const KINDS = ["request", "ack", "progress", "completion", "receipt", "notice"];
 
 export const HELP: Record<string, string> = {
@@ -118,7 +149,9 @@ Notification, one fire-and-forget turn for every peer:
   no --wait, no polling.
   A peer that is not live gets the line \`queued, not delivered yet: <reason>\`:
   the message waits in its inbox until it runs and the next message arrives,
-  when the notification carries every waiting message's count.
+  when the notification carries every waiting message's count. When the target
+  is a stale member address, peers instead delivers to the unique live
+  terminal that runs it now (\`... is not live, but <terminal> runs it now\`).
 
 Notes:
   - After it, end your turn: never sleep, poll or re-open the chat to wait for the answer.
@@ -519,9 +552,25 @@ function cmdSend(argv: string[]): number {
       `Read it with: peers open ${sender}${squadFlag}`;
 
     const live = liveAgent !== null;
+    const profiles = c.store.contacts(sender);
     if (!live) {
-      console.log(`SENT ${target}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-        `queued, not delivered yet: ${target} is not a live herdr agent. It gets the notification when it runs in herdr and the next message arrives. No prompt was sent.`);
+      // The target may be a stale member address while the member runs on a
+      // fresh terminal: follow it to the unique live terminal that runs it now.
+      const follow = followLiveTarget(c.store.root, target, agents, profiles);
+      if (follow.address !== "") {
+        const done = prompt(follow.address, text);
+        if (done.ok) {
+          console.log(`SENT ${target}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+            `${target} is not live, but ${follow.address} runs it now — ${done.detail}`);
+        } else {
+          console.log(`SENT ${target}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+            `queued, not delivered yet: ${target} is not live, and notifying ${follow.address} failed: ${done.detail}`);
+        }
+      } else {
+        const hint = follow.candidates.length > 1 ? ` Live terminals matching it: ${follow.candidates.join(", ")} — address one of them directly.` : "";
+        console.log(`SENT ${target}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+          `queued, not delivered yet: ${target} is not a live agent. It gets the notification when it runs and the next message arrives. No prompt was sent.${hint}`);
+      }
     } else {
       const done = prompt(target, text);
       if (!done.ok) throw new Error(`the message is stored in ${target}'s inbox, but its notification failed: ${done.detail}`);
@@ -529,7 +578,6 @@ function cmdSend(argv: string[]): number {
     }
     // A replaced target never answers: name the session that holds its role now.
     {
-      const profiles = c.store.contacts(sender);
       const liveMap = liveness(c.store, sender, agents);
       const flags = profiles.map((pr) => liveMap.get(pr.address) ?? false);
       const st = statuses(profiles, flags);
@@ -549,7 +597,7 @@ function cmdSend(argv: string[]): number {
       console.log(`REPLY: the answer goes to ${replyTo}, not to you. End your turn now; do not wait for it.`);
     } else if (["request", "notice", "completion"].includes(kind)) {
       console.log(
-        `REPLY: the notification of the answer arrives in this session as a new turn while it runs in herdr. ` +
+        `REPLY: the notification of the answer arrives in this session as a new turn while it runs in herdr or herdr-core. ` +
           `Read the answer then with \`peers open ${target}${squadFlag}\`. End your turn now. ` +
           `Do not sleep, poll, loop, re-read your inbox, list sessions or start a background task or timer to wait for it.`,
       );
