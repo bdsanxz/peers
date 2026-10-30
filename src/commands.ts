@@ -32,12 +32,44 @@ function followLiveTarget(
   const roleOf = new Map(profiles.map((pr) => [pr.address, pr.role ?? null]));
   const hits: string[] = [];
   for (const a of agents) {
+    // Another squad's terminal never stands in for this squad's member,
+    // even when its tab, role or directory names the same member.
+    if (isOtherSquadTerminal(a, root)) continue;
     const dir = a.cwd.split("/").pop() ?? "";
     if ([...names].some((n) => roleOf.get(a.address) === n)) hits.push(a.address);
     else if (dir !== "" && names.has(dir)) hits.push(a.address);
   }
   const uniq = [...new Set(hits)];
   return { address: uniq.length === 1 ? uniq[0]! : "", candidates: uniq };
+}
+
+/** Whether a live terminal provably belongs to another squad: its cwd sits
+ * under a different squad root that holds its own roster.json. A terminal
+ * with no cwd, or one under no roster, cannot be placed and stays eligible,
+ * so sessions outside any squad keep working. */
+function isOtherSquadTerminal(a: HerdrAgent, root: string): boolean {
+  const cwd = a.cwd.trim();
+  if (cwd === "") return false;
+  const other = squadRoot(cwd);
+  if (other === root) return false;
+  try {
+    return fs.statSync(path.join(other, "roster.json")).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a live terminal runs from the member dir of a squad: directly
+ * under the squad root and named for the member. Between several live
+ * spellings of one peer, this one is the member's own session. */
+function isMemberDir(a: HerdrAgent, root: string, peerKey: string): boolean {
+  const cwd = a.cwd.trim();
+  if (cwd === "") return false;
+  const abs = path.resolve(cwd);
+  return (
+    path.dirname(abs).toLowerCase() === root.toLowerCase() &&
+    path.basename(abs).toLowerCase() === peerKey.toLowerCase()
+  );
 }
 
 /** Resolution context for canonical addresses: live agents, stored profiles,
@@ -730,9 +762,21 @@ function cmdSend(argv: string[]): number {
     const peerAliases = peerView(tab.canonical ?? target, cctx).aliases;
     const peerLow = lowerSet(peerAliases);
     let sendTo = tab.terminal ?? null;
+    // Every other spelling of the peer that is live, scoped to the sender's
+    // squad: another squad's terminal never gets this squad's notification,
+    // even when its tab, role or directory names the same member. The
+    // member's own session is its member dir; several leftovers stay queued.
+    let squadHits: string[] = [];
     if (!sendTo) {
-      const hit = agents.find((a) => peerLow.has(a.address.toLowerCase()) || peerLow.has(a.pane.toLowerCase()));
-      if (hit) sendTo = hit.address;
+      const inScope = agents.filter(
+        (a) =>
+          (peerLow.has(a.address.toLowerCase()) || peerLow.has(a.pane.toLowerCase())) &&
+          !isOtherSquadTerminal(a, c.store.root),
+      );
+      const preferred = inScope.filter((a) => isMemberDir(a, c.store.root, peerKey));
+      const ranked = preferred.length > 0 ? preferred : inScope;
+      if (ranked.length === 1) sendTo = ranked[0]!.address;
+      else if (ranked.length > 1) squadHits = [...new Set(ranked.map((a) => a.address))];
     }
     const liveAgent = sendTo ? (agents.find((a) => a.address === sendTo || a.pane === sendTo) ?? null) : null;
     const known = c.store.profile(peerKey);
@@ -787,7 +831,10 @@ function cmdSend(argv: string[]): number {
     // Prose names the target as typed (or its tab): the stored key and every
     // printed command use the canonical peer key instead.
     const displayTarget = tab.canonical ?? target;
-    if (!live) {
+    if (squadHits.length > 0) {
+      console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+        `queued, not delivered yet: ${displayTarget} matches several live terminals in this squad: ${squadHits.join(", ")} — address one of them directly. No prompt was sent.`);
+    } else if (!live) {
       // The target may be a stale member address while the member runs on a
       // fresh terminal: follow it to the unique live terminal that runs it now.
       const follow = followLiveTarget(c.store.root, peerKey, agents, profiles);
@@ -947,7 +994,7 @@ function render(m: Msg, mine: boolean, partner: Partner): void {
 }
 
 function cmdOpen(argv: string[]): number {
-  const p = parseArgs(argv, ["page"]);
+  const p = parseArgs(argv, []);
   unknownFlags(p, ["page", "squad"]);
   const target = p.positionals[0];
   if (!target || p.positionals.length !== 1) throw new UsageError("open needs exactly one <TARGET>");
@@ -1025,7 +1072,7 @@ function cmdOpen(argv: string[]): number {
 }
 
 function cmdDelete(argv: string[]): number {
-  const p = parseArgs(argv, ["squad"]);
+  const p = parseArgs(argv, []);
   unknownFlags(p, ["squad"]);
   const target = p.positionals[0];
   if (!target || p.positionals.length !== 1) throw new UsageError("delete needs exactly one <TARGET>");

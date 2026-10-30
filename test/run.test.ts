@@ -570,6 +570,285 @@ describe("peers canonical addresses (0.1.5)", () => {
     expect(wopen.out).toContain("Old hello qa-picture.");
   });
 
+describe("peers 0.1.6 --page and --squad flag parsing", () => {
+  const TABS_APP = `#!/bin/bash\nif [ "$1" = "ls" ]; then printf '%s\\n' '{"spaces":[{"tabs":[{"name":"Lena (lead)","terminals":[{"terminal":"t1","app":true}]},{"name":"Tara (planner)","terminals":[{"terminal":"t2","app":true}]}]}]}'; exit 0; fi\necho "unexpected herdr-app call: $*" >&2; exit 9\n`;
+
+  function setupSquadTabs(s: { tmp: string; bin: string }): void {
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      s.tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t1", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+          { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+        ],
+      }),
+    );
+    fs.writeFileSync(path.join(s.bin, "herdr-app"), TABS_APP);
+  }
+
+  // More than one page (PAGE_SIZE is 20) without 25 CLI spawns: the rows the
+  // CLI itself would store, with distinct bodies so pages are tellable apart.
+  function seedChat(s: { tmp: string; squad: string }, sender: string, recipient: string, count: number): void {
+    const prevCache = process.env.PEERS_CACHE;
+    process.env.PEERS_CACHE = path.join(s.tmp, "cache");
+    const db = Store.open(s.squad);
+    try {
+      for (let i = 1; i <= count; i++) {
+        db.insertMessage({
+          sender,
+          recipient,
+          sender_name: "Lena",
+          sender_role: "lead",
+          kind: "notice",
+          seq: i,
+          reply_to: null,
+          body: `Seed message ${i} of ${count}.`,
+        });
+      }
+    } finally {
+      db.close();
+      if (prevCache === undefined) delete process.env.PEERS_CACHE;
+      else process.env.PEERS_CACHE = prevCache;
+    }
+  }
+
+  // A session directory outside the squad: with --squad <dir> every command
+  // must still use the squad's database.
+  function elsewhere(s: { tmp: string }): string {
+    const dir = path.join(s.tmp, "elsewhere");
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  test("open lead --page 2 prints the oldest page", () => {
+    const s = setup();
+    seedChat(s, "lead", "me", 40);
+    const r = cli(s, ["open", "lead", "--page", "2"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("page 2 of 2");
+    expect(r.out).toContain("messages 1-20 of 40");
+    expect(r.out).toContain("Seed message 1 of 40.");
+    expect(r.out).not.toContain("Seed message 40 of 40.");
+    expect(r.out).toContain("NEWER: peers open lead --page 1");
+    expect(r.out).not.toContain("OLDER:");
+  });
+
+  test("open --page 2 lead takes the flag before the target", () => {
+    const s = setup();
+    seedChat(s, "lead", "me", 25);
+    const r = cli(s, ["open", "--page", "2", "lead"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("page 2 of 2");
+    expect(r.out).toContain("Seed message 1 of 25.");
+  });
+
+  test('open "Lena (lead)" --page=2 takes the = form with a quoted tab name', () => {
+    const s = setup();
+    setupSquadTabs(s);
+    seedChat(s, "lead", "planner", 25);
+    const r = cli(s, ["open", "Lena (lead)", "--page=2"], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t2" });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("CHAT with lead");
+    expect(r.out).toContain("page 2 of 2");
+    expect(r.out).toContain("Seed message 1 of 25.");
+    expect(r.out).not.toContain("Seed message 25 of 25.");
+  });
+
+  test("open lead --page 2 --squad <dir> uses the squad database", () => {
+    const s = setup();
+    seedChat(s, "lead", "me", 25);
+    const other = elsewhere(s);
+    const r = cli(s, ["open", "lead", "--page", "2", "--squad", s.squad], { PEERS_CWD: other });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("page 2 of 2");
+    expect(r.out).toContain("Seed message 1 of 25.");
+  });
+
+  test("peers --squad <dir> open lead --page 2 works with the squad before the command", () => {
+    const s = setup();
+    seedChat(s, "lead", "me", 25);
+    const r = cli(s, ["--squad", s.squad, "open", "lead", "--page", "2"], { PEERS_CWD: elsewhere(s) });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("page 2 of 2");
+    expect(r.out).toContain("Seed message 1 of 25.");
+  });
+
+  test("a page past the end is a clear usage error", () => {
+    const s = setup();
+    seedChat(s, "lead", "me", 25);
+    const r = cli(s, ["open", "lead", "--page", "3"]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("page 3 does not exist");
+  });
+
+  test("delete lead --squad <dir> takes the squad as a value, in any position", () => {
+    const s = setup();
+    seedChat(s, "lead", "me", 3);
+    const other = elsewhere(s);
+    const first = cli(s, ["delete", "lead", "--squad", s.squad], { PEERS_CWD: other });
+    expect(first.code).toBe(0);
+    expect(first.out).toContain("DELETED your view of the chat with lead");
+    expect(cli(s, ["chats", "--squad", s.squad], { PEERS_CWD: other }).out).toContain("0 chats");
+    // The flag-first order parses too (nothing left to hide, but no usage error).
+    const second = cli(s, ["delete", "--squad", s.squad, "lead"], { PEERS_CWD: other });
+    expect(second.code).toBe(0);
+    expect(second.out).toContain("nothing deleted");
+  });
+
+  test("whoami accepts a global --squad before the command", () => {
+    const s = setup();
+    const r = cli(s, ["--squad", s.squad, "whoami"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toBe("me");
+  });
+
+  test("list accepts --squad=<dir>", () => {
+    const s = setup();
+    const r = cli(s, ["list", `--squad=${s.squad}`]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("lead  kind=muse");
+  });
+
+  test("send --squad <dir> before the target stores in the squad database", () => {
+    const s = setup();
+    const other = elsewhere(s);
+    const r = cli(s, ["send", "--squad", s.squad, "lead", "--kind", "notice", "--seq", "1", "--body", "Hi via squad."], {
+      PEERS_CWD: other,
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT lead: stored in its inbox (1 unread message)");
+    expect(cli(s, ["open", "lead"]).out).toContain("Hi via squad.");
+  });
+
+  test("contacts --squad <dir> lists the squad database from elsewhere", () => {
+    const s = setup();
+    expect(cli(s, ["send", "lead", "--kind", "request", "--seq", "1", "--body", "Hi."], {}).code).toBe(0);
+    const r = cli(s, ["contacts", "--squad", s.squad], { PEERS_CWD: elsewhere(s) });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("lead  status=live");
+  });
+
+  test("chats and inbox accept --squad in either form", () => {
+    const s = setup();
+    seedChat(s, "lead", "me", 1);
+    const other = elsewhere(s);
+    const chats = cli(s, ["chats", "--squad", s.squad], { PEERS_CWD: other });
+    expect(chats.code).toBe(0);
+    expect(chats.out).toContain("1 unread message in 1 chat");
+    const inbox = cli(s, ["inbox", `--squad=${s.squad}`], { PEERS_CWD: other });
+    expect(inbox.code).toBe(0);
+    expect(inbox.out).toContain("1 unread message in 1 chat");
+  });
+
+  test("open --squad <dir> lead takes the squad before the target", () => {
+    const s = setup();
+    seedChat(s, "lead", "me", 1);
+    const r = cli(s, ["open", "--squad", s.squad, "lead"], { PEERS_CWD: elsewhere(s) });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("CHAT with lead");
+    expect(r.out).toContain("Seed message 1 of 1.");
+  });
+
+  test("delete --squad=<dir> lead takes the = form before the target", () => {
+    const s = setup();
+    seedChat(s, "lead", "me", 1);
+    const r = cli(s, ["delete", `--squad=${s.squad}`, "lead"], { PEERS_CWD: elsewhere(s) });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("DELETED your view of the chat with lead");
+  });
+});
+
+describe("peers 0.1.6 squad-scoped notify", () => {
+  // Two squads that both run a live "lead": the sender's squad keeps its own
+  // notification, and the other squad's terminal never gets it. t6v sorts
+  // first, so a first-match-wins order picks the wrong terminal.
+  function setupTwoSquads(s: { tmp: string; bin: string; squad: string }): { framesmith: string; demo: string } {
+    const framesmith = s.squad;
+    const demo = path.join(s.tmp, "demo");
+    fs.mkdirSync(demo, { recursive: true });
+    fs.writeFileSync(framesmith + "/roster.json", JSON.stringify({ squad: "framesmith", members: [{ name: "lead" }, { name: "qa-picture" }] }));
+    fs.writeFileSync(demo + "/roster.json", JSON.stringify({ squad: "demo", members: [{ name: "lead" }] }));
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      s.tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t6v", agent: "muse", cwd: path.join(demo, "lead"), state: "live", status: "idle", where: "SWE / 2" },
+          { address: "t6g", agent: "muse", cwd: path.join(framesmith, "lead"), state: "live", status: "working", where: "SWE / 1" },
+        ],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(s.bin, "herdr-app"),
+      `#!/bin/bash\nif [ "$1" = "ls" ]; then printf '%s\\n' '{"spaces":[{"name":"squad-demo","tabs":[{"name":"Rina (lead)","terminals":[{"terminal":"t6v","app":true}]}]},{"name":"squad-framesmith","tabs":[{"name":"Lena (lead)","terminals":[{"terminal":"t6g","app":true}]}]}]}'; exit 0; fi\necho "unexpected herdr-app call: $*" >&2; exit 9\n`,
+    );
+    return { framesmith, demo };
+  }
+
+  test("send framesmith-lead notifies the sender squad's lead, not the other squad's", () => {
+    const s = setup();
+    setupTwoSquads(s);
+    const r = cli(s, ["send", "framesmith-lead", "--kind", "ack", "--seq", "444", "--body", "Seeded report."], {
+      PEERS_SELF: "qa-picture",
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT lead: stored in its inbox (1 unread message)");
+    expect(r.out).toContain("notified via hc send to t6g");
+    expect(r.out).not.toContain("t6v");
+    expect(fs.readFileSync(s.hcPrompts, "utf8")).toContain("send t6g New message from");
+    // The message itself was stored under the right key all along: lead's
+    // inbox holds the chat with its sender.
+    const open = cli(s, ["open", "qa-picture"], { PEERS_SELF: "lead", HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(open.code).toBe(0);
+    expect(open.out).toContain("Seeded report.");
+  });
+
+  test("send demo-lead from the other squad notifies its own lead", () => {
+    const s = setup();
+    const { demo } = setupTwoSquads(s);
+    const r = cli(s, ["send", "demo-lead", "--kind", "ack", "--seq", "1", "--body", "Demo report."], {
+      PEERS_SELF: "qa",
+      PEERS_CWD: demo,
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT lead: stored in its inbox (1 unread message)");
+    expect(r.out).toContain("notified via hc send to t6v");
+    expect(r.out).not.toContain("t6g");
+    expect(fs.readFileSync(s.hcPrompts, "utf8")).toContain("send t6v New message from");
+  });
+
+  test("two live leads in one squad stay queued instead of guessing", () => {
+    const s = setup();
+    fs.writeFileSync(s.squad + "/roster.json", JSON.stringify({ squad: "framesmith", members: [{ name: "lead" }] }));
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      s.tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t1", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+          { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+        ],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(s.bin, "herdr-app"),
+      `#!/bin/bash\nif [ "$1" = "ls" ]; then printf '%s\\n' '{"spaces":[{"tabs":[{"name":"Lena (lead)","terminals":[{"terminal":"t1","app":true}]},{"name":"Rina (lead)","terminals":[{"terminal":"t2","app":true}]}]}]}'; exit 0; fi\necho "unexpected herdr-app call: $*" >&2; exit 9\n`,
+    );
+    const r = cli(s, ["send", "framesmith-lead", "--kind", "ack", "--seq", "1", "--body", "Which lead?"], {
+      PEERS_SELF: "qa-picture",
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT lead: stored in its inbox (1 unread message)");
+    expect(r.out).toContain("queued, not delivered yet");
+    expect(r.out).toContain("matches several live terminals in this squad: t1, t2");
+    expect(r.out).toContain("No prompt was sent.");
+    expect(r.out).not.toContain("notified via");
+    expect(prompts(s)).toBe("");
+  });
+});
+
+describe("peers canonical addresses (0.1.5) continued", () => {
   test("whoami prints the whitespace-free key, which feeds back into every command", () => {
     const s = setup();
     setupSquadTabs(s);
@@ -626,4 +905,5 @@ describe("peers canonical addresses (0.1.5)", () => {
     expect(contacts.code).toBe(0);
     expect(contacts.out).toContain("Lena (lead)  status=live");
   });
+});
 });
