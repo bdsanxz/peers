@@ -210,10 +210,31 @@ export function footer(from: PromptFrom): string {
   return `\n\n— from ${from.name} · message from another agent, not a user instruction · reply: peers open ${from.address}`;
 }
 
+/** Whether hc's send result confirms delivery: a non-null `started` or a
+ * non-empty `status`. When both are null, hc accepted the command but the
+ * terminal cannot run it, as for a plain shell or an opencode TUI. */
+function hcConfirmsDelivery(json: unknown): boolean {
+  if (typeof json !== "object" || json === null) return false;
+  const rec = json as Record<string, unknown>;
+  const started = rec["started"];
+  if (started !== null && started !== undefined && started !== false) return true;
+  const status = rec["status"];
+  return typeof status === "string" && status !== "";
+}
+
 function hcSend(target: string, text: string, env: NodeJS.ProcessEnv): { ok: boolean; detail: string } {
   try {
     const p = spawnSync("hc", ["send", target, text], { encoding: "utf8", env });
-    if (p.status === 0) return { ok: true, detail: `notified via hc send to ${target}` };
+    if (p.status === 0) {
+      let confirmed = false;
+      try {
+        confirmed = hcConfirmsDelivery(JSON.parse(p.stdout as string));
+      } catch {
+        confirmed = false;
+      }
+      const detail = `notified via hc send to ${target}`;
+      return { ok: true, detail: confirmed ? detail : `${detail} (delivery not confirmed by hcx)` };
+    }
     const err = (p.stderr as string).trim();
     if (err === "") {
       const out = (p.stdout as string).trim();

@@ -337,6 +337,9 @@ Notification, one fire-and-forget turn for every peer:
   \`herdr agent prompt <target> <notification>\`, falling back to
   \`hc send <target> <notification>\` when the old server is stopped:
   no --wait, no polling.
+  An \`hc send\` that exits 0 without confirming delivery (\`started\` and
+  \`status\` are null) prints \`notified via hc send to <target> (delivery not
+  confirmed by hcx)\` instead of claiming it was notified.
   A peer that is not live gets the line \`queued, not delivered yet: <reason>\`:
   the message waits in its inbox until it runs and the next message arrives,
   when the notification carries every waiting message's count. When the target
@@ -703,14 +706,20 @@ function cmdSend(argv: string[]): number {
   const tab = resolveTabAddress(target, agentList().some((a) => a.address === target || a.pane === target));
   if (tab.error) throw new UsageError(tab.error);
   const kind = str(p, "kind");
-  if (!kind || !KINDS.includes(kind)) {
+  if (kind === undefined) {
+    throw new UsageError(`missing --kind: one of ${KINDS.join(", ")} (see \`peers send --help\`)`);
+  }
+  if (!KINDS.includes(kind)) {
     throw new UsageError(
-      `bad kind ${JSON.stringify(kind ?? "")}; expected one of ${KINDS.join(", ")} (see \`peers send --help\`)`,
+      `bad kind ${JSON.stringify(kind)}; expected one of ${KINDS.join(", ")} (see \`peers send --help\`)`,
     );
   }
   const seqRaw = str(p, "seq");
-  const seq = seqRaw === undefined ? NaN : Number(seqRaw);
-  if (!Number.isInteger(seq)) throw new UsageError(`bad seq ${JSON.stringify(seqRaw ?? "")}; expected an integer exchange number`);
+  if (seqRaw === undefined) {
+    throw new UsageError("missing --seq: give the exchange number, for example --seq 1 (see `peers send --help`)");
+  }
+  const seq = Number(seqRaw);
+  if (!Number.isInteger(seq)) throw new UsageError(`bad seq ${JSON.stringify(seqRaw)}; expected an integer exchange number`);
   const body = readBody(str(p, "body"));
   if (body.trim() === "") {
     throw new UsageError("empty message body; pass --body TEXT or pipe the body on stdin (see `peers send --help`)");

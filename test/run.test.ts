@@ -36,7 +36,7 @@ echo "unexpected herdr call: $*" >&2; exit 9
   fs.chmodSync(path.join(bin, "herdr"), 0o755);
   const hcStub = `#!/bin/bash
 if [ "$1" = "ls" ]; then cat "${tmp}/hc.json"; exit 0; fi
-if [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${tmp}/hc-prompts.log"; printf '%s\\n' "\${HC_TERMINAL_ID-unset}" >>"${tmp}/hc-env.log"; [ -n "$HC_FAIL_PLAIN" ] && [ -z "\${HC_TERMINAL_ID+x}" ] && { echo "plain send refused" >&2; exit 1; }; [ "$2" = "flaky" ] && { echo "no such terminal: flaky" >&2; exit 1; }; [ "$2" = "ghost" ] && { echo "no such terminal: ghost" >&2; exit 1; }; exit 0; fi
+if [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${tmp}/hc-prompts.log"; printf '%s\\n' "\${HC_TERMINAL_ID-unset}" >>"${tmp}/hc-env.log"; [ -n "$HC_FAIL_PLAIN" ] && [ -z "\${HC_TERMINAL_ID+x}" ] && { echo "plain send refused" >&2; exit 1; }; [ "$2" = "flaky" ] && { echo "no such terminal: flaky" >&2; exit 1; }; [ "$2" = "ghost" ] && { echo "no such terminal: ghost" >&2; exit 1; }; printf '%s\\n' '{"started":true,"status":"ok","turn":1}'; exit 0; fi
 echo "unexpected hc call: $*" >&2; exit 9
 `;
   fs.writeFileSync(path.join(bin, "hc"), hcStub);
@@ -155,6 +155,31 @@ describe("peers over herdr agent prompt", () => {
     expect(cli(s, ["send", "me", "--kind", "notice", "--seq", "1", "--body", "Hi."]).code).toBe(2);
   });
 
+  test("a send without --seq names the missing flag", () => {
+    const s = setup();
+    const r = cli(s, ["send", "lead", "--kind", "request", "--body", "Hi."]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain(
+      "missing --seq: give the exchange number, for example --seq 1 (see `peers send --help`)",
+    );
+  });
+
+  test("a non-integer --seq keeps the bad seq error", () => {
+    const s = setup();
+    const r = cli(s, ["send", "lead", "--kind", "request", "--seq", "abc", "--body", "Hi."]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain(`bad seq "abc"; expected an integer exchange number`);
+  });
+
+  test("a send without --kind names the missing flag", () => {
+    const s = setup();
+    const r = cli(s, ["send", "lead", "--seq", "1", "--body", "Hi."]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain(
+      "missing --kind: one of request, ack, progress, completion, receipt, notice (see `peers send --help`)",
+    );
+  });
+
   test("contacts, list and delete work", () => {
     const s = setup();
     expect(cli(s, ["send", "lead", "--kind", "request", "--seq", "1", "--body", "Hi."], {}).code).toBe(0);
@@ -213,6 +238,49 @@ describe("peers over herdr agent prompt", () => {
     expect(logged).toContain("— from Zytra · message from another agent, not a user instruction · reply: peers open Zytra");
     // sent without HC_TERMINAL_ID, so hc adds no <hc from> tag
     expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("unset");
+  });
+
+  test("hc send confirms delivery from its JSON", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("notified via hc send to t2");
+    expect(r.out).not.toContain("delivery not confirmed");
+  });
+
+  test("hc send exit 0 without a confirmation says delivery is not confirmed", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "opencode", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    fs.writeFileSync(
+      path.join(s.bin, "hc"),
+      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hc-prompts.log"; printf '%s\\n' '{"started":null,"status":null,"turn":0}'; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
+    );
+    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("notified via hc send to t2 (delivery not confirmed by hcx)");
+  });
+
+  test("a failed hc send is reported and exits 2", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "flaky", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    const r = cli(s, ["send", "flaky", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("stored in flaky's inbox, but its notification failed");
+    expect(r.err).toContain("hc send to flaky failed: no such terminal: flaky");
   });
 
   test("hc notification uses the stated name over the tab name", () => {
