@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { UsageError, parseArgs, str, unknownFlags } from "./args.ts";
 import { aliases, loadCtx, memberKnown, memberOf, primary, type CanonCtx } from "./canonical.ts";
-import { agentList, checkTarget, prompt, resolveTabAddress, tabNameOf, type HerdrAgent, type PromptFrom } from "./herdr.ts";
+import { agentList, checkTarget, effectiveKind, prompt, resolveTabAddress, tabNameOf, type HerdrAgent, type PromptFrom } from "./herdr.ts";
 import { ownContext, ownIdentity, register, selfAddress, squadRoot } from "./identity.ts";
 import { isMemberWord, parenMember } from "./names.ts";
 import { PAGE_SIZE, Store, nowMs, type Msg, type Profile } from "./store.ts";
@@ -829,11 +829,16 @@ function cmdSend(argv: string[]): number {
       `New message from ${who}. You have ${plural(unread, "unread message", "unread messages")} in your inbox. ` +
       `Read it with: peers open ${shellWord(senderKey)}${squadFlag}`;
 
-    const notifyFrom = (to: string): PromptFrom => ({
-      name: displayName,
-      address: senderKey,
-      targetKind: agents.find((a) => a.address === to || a.pane === to)?.kind,
-    });
+    const notifyFrom = (to: string): PromptFrom => {
+      const liveTarget = agents.find((a) => a.address === to || a.pane === to);
+      return {
+        name: displayName,
+        address: senderKey,
+        // A shell-looking hc tab may run a real agent in a login-shell wrapper:
+        // effectiveKind asks `hc get` for its foreground program.
+        targetKind: liveTarget ? effectiveKind(liveTarget) : undefined,
+      };
+    };
     const live = liveAgent !== null;
     const meAliases = lowerSet(ownerView(senderKey, cctx).aliases);
     const profiles = c.store.contacts("").filter((pr) => !meAliases.has(pr.address.toLowerCase()));

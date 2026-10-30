@@ -143,6 +143,39 @@ export interface PromptFrom {
 
 const SHELLS = new Set(["zsh", "sh", "bash", "fish", "dash", "ksh", "nu", "pwsh"]);
 
+/** Per-run cache of `hc get` foreground lookups: one lookup per address. */
+const foregroundOf = new Map<string, string | null>();
+
+/** The foreground program `hc get <address>` reports for a terminal: the
+ * basename of `foreground.name`, in lower case. Null when the lookup fails,
+ * the JSON is unparseable, or the name is empty. Only the address form from
+ * `hc ls --json` is passed: a name often returns not_found. */
+function hcForeground(address: string): string | null {
+  if (foregroundOf.has(address)) return foregroundOf.get(address)!;
+  let fg: string | null = null;
+  const v = hcJson(["get", address]) as { foreground?: { name?: unknown } } | null;
+  const name = v?.foreground?.name;
+  if (typeof name === "string") {
+    const base = (name.split("/").pop() ?? "").trim().toLowerCase();
+    fg = base === "" ? null : base;
+  }
+  foregroundOf.set(address, fg);
+  return fg;
+}
+
+/** The kind peers treats a live target as. hc lists a tab that runs an agent
+ * inside a login-shell wrapper as a plain shell (`agent: "zsh"`), so a shell
+ * kind is checked against the foreground program `hc get` reports: a non-shell
+ * foreground such as `opencode` is the real kind. A failed lookup, or a
+ * missing or shell foreground, keeps the shell kind, so a plain shell always
+ * gets the tagged send. */
+export function effectiveKind(agent: HerdrAgent): string {
+  if (!SHELLS.has(agent.kind.trim().toLowerCase())) return agent.kind;
+  const fg = hcForeground(agent.pane);
+  if (fg === null || SHELLS.has(fg)) return agent.kind;
+  return fg;
+}
+
 /** The Herdr app tab that holds a terminal, or null when the app is absent. */
 export function tabNameOf(terminal: string): string | null {
   if (terminal === "") return null;

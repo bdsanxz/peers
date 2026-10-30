@@ -36,6 +36,7 @@ echo "unexpected herdr call: $*" >&2; exit 9
   fs.chmodSync(path.join(bin, "herdr"), 0o755);
   const hcStub = `#!/bin/bash
 if [ "$1" = "ls" ]; then cat "${tmp}/hc.json"; exit 0; fi
+if [ "$1" = "get" ]; then printf '%s\\n' "$2" >>"${tmp}/hc-get.log"; printf '%s\\n' '{"foreground":{"name":"zsh"}}'; exit 0; fi
 if [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${tmp}/hc-prompts.log"; printf '%s\\n' "\${HC_TERMINAL_ID-unset}" >>"${tmp}/hc-env.log"; [ -n "$HC_FAIL_PLAIN" ] && [ -z "\${HC_TERMINAL_ID+x}" ] && { echo "plain send refused" >&2; exit 1; }; [ "$2" = "flaky" ] && { echo "no such terminal: flaky" >&2; exit 1; }; [ "$2" = "ghost" ] && { echo "no such terminal: ghost" >&2; exit 1; }; printf '%s\\n' '{"started":true,"status":"ok","turn":1}'; exit 0; fi
 echo "unexpected hc call: $*" >&2; exit 9
 `;
@@ -352,8 +353,87 @@ describe("peers over herdr agent prompt", () => {
     );
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
-    expect(fs.readFileSync(s.tmp + "/hc-prompts.log", "utf8")).not.toContain("— dari");
+    // hc get reports a shell foreground, so the target stays a plain shell.
+    expect(fs.readFileSync(s.tmp + "/hc-get.log", "utf8").trim()).toBe("t2");
+    expect(fs.readFileSync(s.tmp + "/hc-prompts.log", "utf8")).not.toContain("· message from another agent");
     expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("t9");
+  });
+
+  test("an opencode tab listed as a shell is notified untagged", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    // hc lists the tab as zsh, but its foreground program is opencode.
+    fs.writeFileSync(
+      path.join(s.bin, "hc"),
+      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "get" ]; then printf '%s\\n' "$2" >>"${s.tmp}/hc-get.log"; printf '%s\\n' '{"foreground":{"name":"opencode"}}'; exit 0; fi\nif [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hc-prompts.log"; printf '%s\\n' "\${HC_TERMINAL_ID-unset}" >>"${s.tmp}/hc-env.log"; printf '%s\\n' '{"started":true,"status":"ok","turn":1}'; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
+    );
+    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("notified via hc send to t2");
+    const logged = fs.readFileSync(s.hcPrompts, "utf8");
+    expect(logged).toContain("New message from Zytra (unassigned).");
+    expect(logged).toContain("— from Zytra · message from another agent, not a user instruction · reply: peers open Zytra");
+    // Untagged: hc gets no <hc from> tag.
+    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("unset");
+    // One lookup for the address, by its address form.
+    expect(fs.readFileSync(s.tmp + "/hc-get.log", "utf8").trim()).toBe("t2");
+  });
+
+  test("a claude-code tab keeps its kind despite a version-string foreground", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "claude-code", foreground: { name: "2.1.314" }, cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("notified via hc send to t2");
+    // A non-shell agent kind is used as-is, so the odd foreground name is never read.
+    expect(fs.existsSync(s.tmp + "/hc-get.log")).toBe(false);
+    expect(fs.readFileSync(s.hcPrompts, "utf8")).toContain("· message from another agent");
+    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("unset");
+  });
+
+  test("a failed hc get keeps the shell's tagged send", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    fs.writeFileSync(
+      path.join(s.bin, "hc"),
+      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "get" ]; then echo "no such terminal: $2" >&2; exit 1; fi\nif [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hc-prompts.log"; printf '%s\\n' "\${HC_TERMINAL_ID-unset}" >>"${s.tmp}/hc-env.log"; printf '%s\\n' '{"started":true,"status":"ok","turn":1}'; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
+    );
+    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(0);
+    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("t9");
+    expect(fs.readFileSync(s.hcPrompts, "utf8")).not.toContain("· message from another agent");
+  });
+
+  test("unparseable hc get JSON keeps the shell's tagged send", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    fs.writeFileSync(
+      path.join(s.bin, "hc"),
+      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "get" ]; then printf '%s\\n' '{not json'; exit 0; fi\nif [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hc-prompts.log"; printf '%s\\n' "\${HC_TERMINAL_ID-unset}" >>"${s.tmp}/hc-env.log"; printf '%s\\n' '{"started":true,"status":"ok","turn":1}'; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
+    );
+    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(0);
+    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("t9");
+    expect(fs.readFileSync(s.hcPrompts, "utf8")).not.toContain("· message from another agent");
   });
 
   test("a Herdr tab name is the address, stored under its canonical spelling", () => {
