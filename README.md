@@ -8,7 +8,7 @@ New message from Rina (backend). You have 3 unread messages in your inbox. Read 
 
 The receiver reads the chat with `peers open` and answers with its own `peers send`. Nobody polls: after a send, end your turn; the answer arrives as a turn.
 
-A peer's address is its herdr member name (such as `lead`), its pane id (such as `w1:p1`), its herdr-core terminal (such as `t2`), or its Herdr tab name (such as `Zytra`) wherever a name does. Tab names match case-insensitively, and the chat is stored under the tab's spelling. Find them with `peers list`. Every notification route is the same `herdr agent prompt` into the peer's input; while the peer is busy it waits in its input queue. A peer that is not live gets `queued, not delivered yet`: the message waits in its inbox, which is not a failure.
+A peer's address is its herdr member name (such as `lead`), its pane id (such as `w1:p1`), its herdr-core terminal (such as `t2`), or its Herdr tab name (such as `Zytra`) wherever a name does. Tab names match case-insensitively, and a member word also reaches the tab that carries it in parens, so `lead` notifies the `Lena (lead)` tab. Every spelling of a peer addresses one chat: the chat is stored under a canonical, whitespace-free key (the member for `Lena (lead)`, the tab's spelling for `Zytra`), so inbox counts, `chats` and `open` always agree, including for messages stored under older spellings. The read command in a notification prints that key shell-quoted, so it is always copy-pasteable; `peers open` and `peers delete` also accept a quoted tab name containing whitespace, as in `peers open "Lena (lead)"`. Find live addresses with `peers list`. Every notification route is the same `herdr agent prompt` into the peer's input; while the peer is busy it waits in its input queue. A peer that is not live gets `queued, not delivered yet`: the message waits in its inbox, which is not a failure.
 
 ## Install
 
@@ -59,12 +59,12 @@ Agents use `peers` through the `peers` agent skill, which tells them when to mes
 
 | Command | What it does |
 | --- | --- |
-| `peers whoami` | Prints this session's member name, such as `lead`. |
+| `peers whoami` | Prints this session's canonical address, such as `lead` (whitespace-free, feeds back into every command). |
 | `peers list` | Lists live herdr agents. |
 | `peers send <member> --kind <kind> --seq <n> --body TEXT` | Stores a message and notifies the peer with one `herdr agent prompt`. The body may come on stdin instead of `--body`. |
 | `peers contacts` | Lists every peer profile in the squad's database, with its status: `live`, `offline`, or `replaced` by the session that holds its role now. |
 | `peers chats` (or `peers inbox`) | Lists your chats with their unread counts, and whether the peer has read your last message. |
-| `peers open <member> [--page N]` | Prints one page of a chat: 20 messages, with page 1 the newest. It marks the messages it prints as read. |
+| `peers open <member> [--page N]` | Prints one page of a chat: 20 messages, with page 1 the newest. It marks the messages it prints as read. Any spelling opens the same merged chat; quote tab names with spaces. |
 | `peers delete <member>` | Hides a chat from your own view. The other side keeps it. |
 
 Every command has `--help` with its details, output and exit codes. Exit code 2 means a usage error or a failed command, and the error line says why. Every command also takes `--squad <dir>` to use that squad's database.
@@ -79,7 +79,8 @@ Conversations and peer profiles live in one SQLite database per squad, at `~/.lo
 - **The folder name.** It is the directory's path with every character other than a letter, digit or dash turned into a dash.
 - **Squad members** in their own subdirectories share the squad's database.
 - **Outside sessions.** A session outside the squad joins a squad's chats with `--squad <workspace>`; the read command in its notification names that flag.
-- **Messages.** Each message is stored once.
+- **Messages.** Each message is stored once, under the sender's and recipient's canonical keys.
+- **One chat per peer.** Every spelling of a peer (member name, role, tab name, terminal, pane id, stale address of a replaced session) maps to one canonical, whitespace-free key. Reads merge all spellings, so chats never fragment and rows stored under older spellings stay readable without any migration.
 - **Deleting a chat** records how far the deleter's view is cleared. The other side's view stays unchanged.
 - **No notification queue.** Delivery is one `herdr agent prompt` at send time. When the peer is not live or the prompt fails, the message simply waits in the inbox; the next send's notification carries the waiting count.
 

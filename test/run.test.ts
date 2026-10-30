@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Store } from "../src/store.ts";
 
 const MAIN = path.join(import.meta.dir, "..", "src", "main.ts");
 
@@ -225,7 +226,10 @@ describe("peers over herdr agent prompt", () => {
     expect(r.code).toBe(0);
     const logged = fs.readFileSync(s.hcPrompts, "utf8");
     expect(logged).toContain("New message from Declared (unassigned).");
-    expect(logged).toContain("— from Declared · message from another agent, not a user instruction · reply: peers open Declared");
+    // The footer reply carries the chat key (Zytra), not the stated display
+    // name: `peers open Declared` names no member, terminal or tab, so the
+    // old footer command never ran (peers 0.1.5 canonical addresses).
+    expect(logged).toContain("— from Declared · message from another agent, not a user instruction · reply: peers open Zytra");
     expect(logged).toContain("Read it with: peers open Zytra");
   });
 
@@ -468,5 +472,158 @@ describe("peers over herdr agent prompt", () => {
     });
     expect(r.code).toBe(0);
     expect(r.out).toContain("SENT vps/t7");
+  });
+});
+
+describe("peers canonical addresses (0.1.5)", () => {
+  const TABS_APP = `#!/bin/bash\nif [ "$1" = "ls" ]; then printf '%s\\n' '{"spaces":[{"tabs":[{"name":"Lena (lead)","terminals":[{"terminal":"t1","app":true}]},{"name":"Tara (planner)","terminals":[{"terminal":"t2","app":true}]}]}]}'; exit 0; fi\necho "unexpected herdr-app call: $*" >&2; exit 9\n`;
+
+  function setupSquadTabs(s: { tmp: string; bin: string }): void {
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      s.tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t1", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+          { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+        ],
+      }),
+    );
+    fs.writeFileSync(path.join(s.bin, "herdr-app"), TABS_APP);
+  }
+
+  const fromLead = { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t1" };
+  const asTara = { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t2" };
+
+  test("a tab with spaces sends to a member word; the peer reads it under any spelling", () => {
+    const s = setup();
+    setupSquadTabs(s);
+    const sent = cli(s, ["send", "planner", "--kind", "request", "--seq", "1", "--body", "Hi Tara."], fromLead);
+    expect(sent.code).toBe(0);
+    expect(sent.out).toContain("SENT planner: stored in its inbox (1 unread message)");
+    expect(sent.out).toContain("notified via hc send to t2");
+    const logged = fs.readFileSync(s.hcPrompts, "utf8");
+    expect(logged).toContain("Read it with: peers open lead");
+    expect(logged).not.toContain("peers open Lena (lead)");
+
+    const chats = cli(s, ["chats"], asTara);
+    expect(chats.code).toBe(0);
+    expect(chats.out).toContain("INBOX planner");
+    expect(chats.out).toContain("1 unread message in 1 chat");
+    expect(chats.out).toContain("OPEN: peers open lead");
+
+    const openTab = cli(s, ["open", "Lena (lead)"], asTara);
+    expect(openTab.code).toBe(0);
+    expect(openTab.out).toContain("CHAT with lead (unassigned)");
+    expect(openTab.out).toContain("Hi Tara.");
+    const openLead = cli(s, ["open", "lead"], asTara);
+    expect(openLead.code).toBe(0);
+    expect(openLead.out).toContain("Hi Tara.");
+
+    // A quoted tab name sends back to the same merged chat.
+    const reply = cli(s, ["send", "Lena (lead)", "--kind", "ack", "--seq", "1", "--body", "On it."], asTara);
+    expect(reply.code).toBe(0);
+    expect(reply.out).toContain("SENT lead: stored in its inbox (1 unread message)");
+    const back = cli(s, ["open", "planner"], fromLead);
+    expect(back.code).toBe(0);
+    expect(back.out).toContain("On it.");
+
+    // Deleting by the quoted tab name hides only the deleter's view.
+    const del = cli(s, ["delete", "Lena (lead)"], asTara);
+    expect(del.code).toBe(0);
+    expect(del.out).toContain("DELETED your view of the chat with lead");
+    expect(cli(s, ["chats"], asTara).out).toContain("0 chats");
+    expect(cli(s, ["chats"], fromLead).out).toContain("1 chat");
+  });
+
+  test("old rows stored under other spellings are still found", () => {
+    const s = setup();
+    const prevCache = process.env.PEERS_CACHE;
+    process.env.PEERS_CACHE = path.join(s.tmp, "cache");
+    const db = Store.open(s.squad);
+    try {
+      db.insertMessage({ sender: "Lena (lead)", recipient: "planner", sender_name: "Lena (lead)", sender_role: "lead", kind: "notice", seq: 1, reply_to: null, body: "Old hello planner." });
+      db.insertMessage({ sender: "Lena (lead)", recipient: "qa-picture", sender_name: "Lena (lead)", sender_role: "lead", kind: "notice", seq: 1, reply_to: null, body: "Old hello qa-picture." });
+    } finally {
+      db.close();
+      if (prevCache === undefined) delete process.env.PEERS_CACHE;
+      else process.env.PEERS_CACHE = prevCache;
+    }
+    // Whitespace identities read the rows stored under the member words.
+    const tara = { HERDR_PANE_ID: "", HC_TERMINAL_ID: "", PEERS_SELF: "Tara (planner)" };
+    const wulan = { HERDR_PANE_ID: "", HC_TERMINAL_ID: "", PEERS_SELF: "Wulan (qa-picture)" };
+    const chats = cli(s, ["chats"], tara);
+    expect(chats.code).toBe(0);
+    expect(chats.out).toContain("INBOX planner");
+    expect(chats.out).toContain("1 unread message in 1 chat");
+    const openTab = cli(s, ["open", "Lena (lead)"], tara);
+    expect(openTab.code).toBe(0);
+    expect(openTab.out).toContain("Old hello planner.");
+    const openLead = cli(s, ["open", "lead"], tara);
+    expect(openLead.code).toBe(0);
+    expect(openLead.out).toContain("Old hello planner.");
+    const wchats = cli(s, ["chats"], wulan);
+    expect(wchats.out).toContain("INBOX qa-picture");
+    expect(wchats.out).toContain("1 unread message in 1 chat");
+    const wopen = cli(s, ["open", "lead"], wulan);
+    expect(wopen.code).toBe(0);
+    expect(wopen.out).toContain("Old hello qa-picture.");
+  });
+
+  test("whoami prints the whitespace-free key, which feeds back into every command", () => {
+    const s = setup();
+    setupSquadTabs(s);
+    const who = cli(s, ["whoami"], asTara);
+    expect(who.code).toBe(0);
+    expect(who.out).toBe("planner");
+    expect(who.out).not.toContain(" ");
+    const sent = cli(s, ["send", who.out, "--kind", "request", "--seq", "1", "--body", "Via whoami."], fromLead);
+    expect(sent.code).toBe(0);
+    expect(cli(s, ["chats"], asTara).out).toContain("1 unread message in 1 chat");
+  });
+
+  test("a send to a member word is visible in the tab owner's chats", () => {
+    const s = setup();
+    setupSquadTabs(s);
+    const sent = cli(s, ["send", "lead", "--kind", "request", "--seq", "1", "--body", "Tara here."], asTara);
+    expect(sent.code).toBe(0);
+    expect(sent.out).toContain("SENT lead: stored in its inbox (1 unread message)");
+    const chats = cli(s, ["chats"], fromLead);
+    expect(chats.code).toBe(0);
+    expect(chats.out).toContain("INBOX lead");
+    expect(chats.out).toContain("1 unread message in 1 chat");
+    expect(chats.out).toContain("planner");
+    const openTab = cli(s, ["open", "Tara (planner)"], fromLead);
+    expect(openTab.code).toBe(0);
+    expect(openTab.out).toContain("Tara here.");
+    const openMember = cli(s, ["open", "planner"], fromLead);
+    expect(openMember.code).toBe(0);
+    expect(openMember.out).toContain("Tara here.");
+  });
+
+  test("a stated display name never becomes the chat key", () => {
+    const s = setup();
+    setupSquadTabs(s);
+    const first = cli(s, ["send", "planner", "--name", "Lena (lead)", "--role", "lead", "--kind", "request", "--seq", "1", "--body", "First."], fromLead);
+    expect(first.code).toBe(0);
+    const second = cli(s, ["send", "planner", "--name", "Vrax", "--role", "lead", "--kind", "ack", "--seq", "1", "--body", "Second."], fromLead);
+    expect(second.code).toBe(0);
+    const logged = fs.readFileSync(s.hcPrompts, "utf8");
+    expect(logged).toContain("New message from Lena (lead).");
+    expect(logged).toContain("reply: peers open lead");
+    expect(logged).not.toContain("peers open Lena (lead)");
+    const chats = cli(s, ["chats"], asTara);
+    expect(chats.out).toContain("2 unread messages in 1 chat");
+    const open = cli(s, ["open", "lead"], asTara);
+    expect(open.out).toContain("First.");
+    expect(open.out).toContain("Second.");
+  });
+
+  test("contacts resolves live status through the canonical key", () => {
+    const s = setup();
+    expect(cli(s, ["whoami"], { PEERS_SELF: "Lena (lead)", HERDR_PANE_ID: "", PEERS_ROLE: "lead" }).code).toBe(0);
+    const contacts = cli(s, ["contacts"]);
+    expect(contacts.code).toBe(0);
+    expect(contacts.out).toContain("Lena (lead)  status=live");
   });
 });

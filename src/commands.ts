@@ -3,8 +3,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { UsageError, parseArgs, str, unknownFlags } from "./args.ts";
+import { aliases, loadCtx, memberKnown, memberOf, primary, type CanonCtx } from "./canonical.ts";
 import { agentList, checkTarget, prompt, resolveTabAddress, tabNameOf, type HerdrAgent, type PromptFrom } from "./herdr.ts";
 import { ownContext, ownIdentity, register, selfAddress, squadRoot } from "./identity.ts";
+import { isMemberWord, parenMember } from "./names.ts";
 import { PAGE_SIZE, Store, nowMs, type Msg, type Profile } from "./store.ts";
 
 /** Follow a stale member address to the live terminal that runs it now.
@@ -38,6 +40,148 @@ function followLiveTarget(
   return { address: uniq.length === 1 ? uniq[0]! : "", candidates: uniq };
 }
 
+/** Resolution context for canonical addresses: live agents, stored profiles,
+ * Herdr tabs and the squad roster. Profiles are reloaded after every write,
+ * so a fresh placeholder is visible to the same command. */
+function canonCtx(store: Store, agents: HerdrAgent[]): CanonCtx {
+  return loadCtx(store.root, agents, store.contacts(""));
+}
+
+/** This session's canonical key and every spelling that names it. */
+function ownerView(me: string, cctx: CanonCtx): { key: string; aliases: string[] } {
+  const key = primary(me, cctx);
+  return { key, aliases: [...new Set([...aliases(me, cctx), ...aliases(key, cctx)])] };
+}
+
+/** A peer's canonical key and every spelling that names it. */
+function peerView(target: string, cctx: CanonCtx): { key: string; aliases: string[] } {
+  const key = primary(target, cctx);
+  return { key, aliases: [...new Set([...aliases(target, cctx), ...aliases(key, cctx)])] };
+}
+
+function lowerSet(vs: string[]): Set<string> {
+  return new Set(vs.map((v) => v.toLowerCase()));
+}
+
+/** A target with whitespace is only valid as a quoted tab or display name:
+ * it must match a live tab or carry a "(member)" suffix. Anything else keeps
+ * the whitespace rejection. Non-whitespace names pass through untouched. */
+function checkAddressTarget(target: string): void {
+  const err = checkTarget(target);
+  if (!err) return;
+  if (/\s/.test(target)) {
+    const reserved = agentList().some((a) => a.address === target || a.pane === target);
+    const tab = resolveTabAddress(target, reserved);
+    if (tab.error) throw new UsageError(tab.error);
+    if (tab.canonical || parenMember(target) !== null) return;
+  }
+  throw new UsageError(err);
+}
+
+/** A name the squad knows: a live agent address or pane, a Herdr tab (which
+ * may hold whitespace), a member backed by the roster, a profile or a live
+ * agent, or a stored profile address. Legacy terminal forms (pane ids,
+ * machine/terminal) keep their old path. */
+function isKnownPeer(target: string, cctx: CanonCtx, store: Store): boolean {
+  const t = target.trim();
+  if (t === "") return false;
+  if (t.includes(":") || t.includes("/")) return true;
+  const low = t.toLowerCase();
+  if (cctx.agents.some((a) => a.address.toLowerCase() === low || a.pane.toLowerCase() === low)) return true;
+  if (cctx.tabs.some((tb) => tb.name.toLowerCase() === low)) return true;
+  const pm = parenMember(t);
+  if (pm !== null && isMemberWord(pm) && memberKnown(pm, cctx)) return true;
+  const m = memberOf(t, cctx);
+  if (m !== null && memberKnown(m, cctx)) return true;
+  const als = lowerSet(aliases(t, cctx));
+  return store.contacts("").some((p) => als.has(p.address.toLowerCase()));
+}
+
+/** One merged chat: every spelling of the peer in a single row. */
+interface MergedChat {
+  peer: string;
+  total: number;
+  unread: number;
+  last: Msg;
+  profile: Profile | null;
+}
+
+function bestProfile(cctx: CanonCtx, peerAliases: string[]): Profile | null {
+  const set = lowerSet(peerAliases);
+  const cands = cctx.profiles.filter((p) => set.has(p.address.toLowerCase()));
+  if (cands.length === 0) return null;
+  cands.sort(
+    (a, b) =>
+      Number(b.role !== null) - Number(a.role !== null) ||
+      Number(b.name !== null) - Number(a.name !== null) ||
+      b.updated_at - a.updated_at,
+  );
+  return cands[0]!;
+}
+
+/** Every chat `ownerAliases` can see, newest first, with all spellings of
+ * each peer merged. The inbox count and the notification count both come
+ * from here, so they always agree. */
+function mergedChats(store: Store, cctx: CanonCtx, ownerAliases: string[]): MergedChat[] {
+  const ownLow = lowerSet(ownerAliases);
+  const before = new Map<string, number>();
+  for (const c of store.clearedForOwners(ownerAliases)) {
+    const k = primary(c.peer, cctx).toLowerCase();
+    before.set(k, Math.max(before.get(k) ?? 0, c.before_id));
+  }
+  const groups = new Map<string, { display: string; msgs: Msg[] }>();
+  for (const m of store.messagesForOwners(ownerAliases)) {
+    const senderMine = ownLow.has(m.sender.toLowerCase());
+    const recipMine = ownLow.has(m.recipient.toLowerCase());
+    if (senderMine === recipMine) continue;
+    const other = senderMine ? m.recipient : m.sender;
+    const k = primary(other, cctx).toLowerCase();
+    if (m.id <= (before.get(k) ?? 0)) continue;
+    const g = groups.get(k);
+    if (g) g.msgs.push(m);
+    else groups.set(k, { display: primary(other, cctx), msgs: [m] });
+  }
+  const out: MergedChat[] = [];
+  for (const [, g] of groups) {
+    g.msgs.sort((a, b) => a.id - b.id);
+    const last = g.msgs[g.msgs.length - 1]!;
+    const peerAliases = [...new Set([...aliases(g.display, cctx), ...aliases(last.sender, cctx), ...aliases(last.recipient, cctx)])];
+    const unread = g.msgs.filter((m) => ownLow.has(m.recipient.toLowerCase()) && m.read_at === null).length;
+    out.push({ peer: g.display, total: g.msgs.length, unread, last, profile: bestProfile(cctx, peerAliases) });
+  }
+  out.sort((a, b) => b.last.id - a.last.id);
+  return out;
+}
+
+/** Unread messages across the whole inbox: the same merged sum `chats` prints. */
+function inboxUnread(store: Store, cctx: CanonCtx, ownerAliases: string[]): number {
+  return mergedChats(store, cctx, ownerAliases).reduce((n, ch) => n + ch.unread, 0);
+}
+
+/** Visible messages of one chat: the owner's messages whose other side names
+ * `peerKey`. The pairing is compared by canonical key in JS (not SQL `IN`),
+ * so a sender stored as "Lena (lead)" still pairs with peer key "lead". */
+function visibleChat(store: Store, cctx: CanonCtx, ownerAliases: string[], peerKey: string): Msg[] {
+  const ownLow = lowerSet(ownerAliases);
+  const pk = peerKey.toLowerCase();
+  const before = new Map<string, number>();
+  for (const c of store.clearedForOwners(ownerAliases)) {
+    const k = primary(c.peer, cctx).toLowerCase();
+    before.set(k, Math.max(before.get(k) ?? 0, c.before_id));
+  }
+  const out: Msg[] = [];
+  for (const m of store.messagesForOwners(ownerAliases)) {
+    const senderMine = ownLow.has(m.sender.toLowerCase());
+    const recipMine = ownLow.has(m.recipient.toLowerCase());
+    if (senderMine === recipMine) continue;
+    const other = senderMine ? m.recipient : m.sender;
+    if (primary(other, cctx).toLowerCase() !== pk) continue;
+    if (m.id <= (before.get(pk) ?? 0)) continue;
+    out.push(m);
+  }
+  return out;
+}
+
 const KINDS = ["request", "ack", "progress", "completion", "receipt", "notice"];
 
 export const HELP: Record<string, string> = {
@@ -46,7 +190,7 @@ export const HELP: Record<string, string> = {
 Usage: peers [--squad <dir>] <command> [options]
 
 Commands:
-  whoami     Print this session's member address
+  whoami     Print this session's canonical address
   list       List live agents (old herdr and herdr-core terminals)
   send       Store one message in a chat, then notify the peer (herdr prompt, else hc send)
   contacts   List every peer profile in the squad's database, with its status
@@ -68,8 +212,15 @@ Addresses:
   A peer's address is its member name (such as "lead"), its pane id
   (such as "w1:p1"), its herdr-core terminal (such as "t2") or its
   Herdr tab name (such as "Zytra") wherever a name does. Tab names match
-  case-insensitively, and the chat is stored under the tab's spelling.
-  Find them with \`peers list\`.
+  case-insensitively, and a member word also reaches the tab that carries
+  it in parens, so "lead" notifies the "Lena (lead)" tab. Every spelling
+  of a peer addresses one chat: the chat is stored under a canonical,
+  whitespace-free key (the member for "Lena (lead)", the tab's spelling
+  for "Zytra"), so inbox counts, chats and open always agree, including
+  for messages stored under older spellings. The read command in a
+  notification prints that key shell-quoted, so it is always
+  copy-pasteable; \`peers open\` and \`peers delete\` also accept a quoted
+  tab name containing whitespace. Find live addresses with \`peers list\`.
 
 For agents:
   - After a send, end your turn: never sleep, poll, loop or re-open to wait for the answer.
@@ -97,12 +248,14 @@ Examples:
   peers send lead --kind request --seq 1 --body "Review api/."
   peers chats
   peers open lead`,
-  whoami: `peers whoami — print this session's member address
+  whoami: `peers whoami — print this session's canonical address
 
 Usage: peers whoami
 
 Output:
-  lead                  this session's address, one line
+  lead                  this session's address, one line: the canonical,
+                        whitespace-free key, so it feeds back into every
+                        peers command (a "Lena (lead)" tab prints "lead")
 
 Identity, first match wins:
   PEERS_SELF=<address>  overrides everything below
@@ -160,6 +313,10 @@ Notification, one fire-and-forget turn for every peer:
 
 Notes:
   - After it, end your turn: never sleep, poll or re-open the chat to wait for the answer.
+  - <TARGET> is any spelling of the peer: its member name, tab name
+    (quote it when it holds spaces, as in \`peers send "Lena (lead)"\`),
+    terminal or pane id. The message is stored under the peer's
+    canonical key, and the notification's read command names that key.
   - Reuse the request's --seq for every message of its exchange; a new exchange takes a new number.
   - Write --name (and PEERS_NAME, .peers.json's display_name) without the role: --name Rina, not
     --name "Rina (backend)". peers adds the role itself, so the peer sees "Rina (backend)".
@@ -248,6 +405,9 @@ Reply:
 Notes:
   - Printing marks the messages read: read all of it, never pipe it through head or tail.
   - Unread messages on an OLDER page: open that page too before you act.
+  - <TARGET> is any spelling of the peer: its member name, tab name
+    (quote it when it holds spaces, as in \`peers open "Lena (lead)"\`),
+    terminal or pane id. Every spelling opens the same merged chat.
   - Exit 2 when the page does not exist.
 
 Examples:
@@ -263,6 +423,7 @@ Output:
 
 Notes:
   - Only your view: the peer keeps every message.
+  - <TARGET> is any spelling of the peer, quoted when it holds spaces.
   - A new message in either direction restarts the chat, showing only what came after.
   - Delete only when the user asks, or when the exchange is closed and its history is not needed.
 
@@ -366,7 +527,20 @@ function cmdWhoami(argv: string[]): number {
   unknownFlags(p, ["squad"]);
   if (p.positionals.length !== 0) throw new UsageError("whoami takes no arguments");
   const me = selfAddress();
-  console.log(me);
+  // The canonical key, never a tab with spaces: the output feeds straight
+  // back into any peers command.
+  try {
+    const { dir } = ownContext();
+    const store = Store.open(squadRoot(dir));
+    try {
+      const cctx = loadCtx(store.root, agentList(), store.contacts(""));
+      console.log(primary(me, cctx));
+    } finally {
+      store.close();
+    }
+  } catch {
+    console.log(me);
+  }
   // Recording the profile is a courtesy; whoami answers even when the database cannot be written.
   try {
     const { dir, kind } = ownContext();
@@ -392,8 +566,22 @@ function cmdList(argv: string[]): number {
   } catch {
     me = null;
   }
-  for (const a of agentList()) {
-    if (me !== null && (a.address === me || a.pane === me)) continue;
+  const agents = agentList();
+  // Your own session is never listed: match through the canonical key, so a
+  // tab identity ("Tara (planner)") also hides its terminal ("t2").
+  let mine = new Set<string>();
+  if (me !== null) {
+    mine.add(me.toLowerCase());
+    try {
+      const { dir } = ownContext();
+      const cctx = loadCtx(squadRoot(dir), agents, []);
+      mine = lowerSet(aliases(me, cctx));
+    } catch {
+      // alias expansion is best-effort; the raw address still hides itself
+    }
+  }
+  for (const a of agents) {
+    if (mine.has(a.address.toLowerCase()) || mine.has(a.pane.toLowerCase())) continue;
     console.log(`${a.address}  kind=${a.kind}  status=${a.state}  cwd=${a.cwd}  workspace=${a.workspace}`);
   }
   return 0;
@@ -445,13 +633,19 @@ function statuses(profiles: Profile[], live: boolean[]): Status[] {
   });
 }
 
-/** Whether each profiled peer runs now in herdr. `me` is live by definition. */
-function liveness(store: Store, me: string, agents: HerdrAgent[]): Map<string, boolean> {
-  const byAddress = new Map(agents.map((a) => [a.address, true]));
-  const byPane = new Map(agents.map((a) => [a.pane, true]));
+/** Whether each profiled peer runs now in herdr. A peer is live when any
+ * spelling of it — tab name, member name, terminal — is live, resolved
+ * through the same canonical key as chats. `me` is live by definition. */
+function liveness(store: Store, meAliases: Set<string>, agents: HerdrAgent[], cctx: CanonCtx): Map<string, boolean> {
+  const live = new Set<string>();
+  for (const a of agents) {
+    live.add(a.address.toLowerCase());
+    live.add(a.pane.toLowerCase());
+  }
   const out = new Map<string, boolean>();
   for (const p of store.contacts("")) {
-    out.set(p.address, p.address === me || byAddress.has(p.address) || byPane.has(p.address));
+    const pal = aliases(p.address, cctx).map((a) => a.toLowerCase());
+    out.set(p.address, pal.some((a) => meAliases.has(a) || live.has(a)));
   }
   return out;
 }
@@ -473,11 +667,9 @@ function cmdSend(argv: string[]): number {
         `the body goes in --body TEXT or on stdin, as in \`peers send ${target} --kind <kind> --seq <n> --body "<text>"\``,
     );
   }
+  checkAddressTarget(target);
   const tab = resolveTabAddress(target, agentList().some((a) => a.address === target || a.pane === target));
   if (tab.error) throw new UsageError(tab.error);
-  const address = tab.canonical ?? target;
-  const bad = checkTarget(target);
-  if (bad) throw new UsageError(bad);
   const kind = str(p, "kind");
   if (!kind || !KINDS.includes(kind)) {
     throw new UsageError(
@@ -492,18 +684,26 @@ function cmdSend(argv: string[]): number {
     throw new UsageError("empty message body; pass --body TEXT or pipe the body on stdin (see `peers send --help`)");
   }
   const replyRaw = str(p, "reply-to");
-  let replyTo: string | null = null;
+  let replyToRaw: string | null = null;
   if (replyRaw !== undefined) {
-    const err = checkTarget(replyRaw);
-    if (err) throw new UsageError(`bad --reply-to ${err}`);
-    replyTo = replyRaw.trim();
+    checkAddressTarget(replyRaw.trim());
+    replyToRaw = replyRaw.trim();
   }
-  const sender = selfAddress();
-  if (sender === address) throw new UsageError("refusing to send a message to yourself");
+  const senderRaw = selfAddress();
 
   const squad = str(p, "squad");
   const c = openCtx(squad, true);
   try {
+    const agents = agentList();
+    // Every spelling of the two sides maps to one canonical, whitespace-free
+    // key: "Lena (lead)" sends as "lead", "planner" stays "planner".
+    let cctx = canonCtx(c.store, agents);
+    const senderKey = primary(senderRaw, cctx);
+    const peerKey = primary(tab.canonical ?? target, cctx);
+    if (senderKey.toLowerCase() === peerKey.toLowerCase()) {
+      throw new UsageError("refusing to send a message to yourself");
+    }
+    const replyTo = replyToRaw === null ? null : primary(replyToRaw, cctx);
     const { role: statedRole, name: statedName } = ownIdentity(str(p, "role"), str(p, "name"), [
       process.cwd(),
       c.dir,
@@ -512,7 +712,7 @@ function cmdSend(argv: string[]): number {
     const role = statedRole ?? "unassigned";
     c.store.upsertProfile(
       {
-        address: sender,
+        address: senderKey,
         runtime: c.kind,
         name: statedName,
         role: stated ? statedRole : null,
@@ -522,15 +722,23 @@ function cmdSend(argv: string[]): number {
       stated,
     );
 
-    const agents = agentList();
     // A tab name is only the address: the notification and the live check
-    // use the tab's terminal, never the name in the terminal's place.
-    const sendTo = tab.terminal ?? address;
-    const liveAgent = agents.find((a) => a.address === sendTo || a.pane === sendTo) ?? null;
-    const known = c.store.profile(address);
+    // use the tab's terminal (a member word matches its "(member)" tab),
+    // else any live spelling of the canonical peer, never the name in the
+    // terminal's place.
+    cctx = canonCtx(c.store, agents);
+    const peerAliases = peerView(tab.canonical ?? target, cctx).aliases;
+    const peerLow = lowerSet(peerAliases);
+    let sendTo = tab.terminal ?? null;
+    if (!sendTo) {
+      const hit = agents.find((a) => peerLow.has(a.address.toLowerCase()) || peerLow.has(a.pane.toLowerCase()));
+      if (hit) sendTo = hit.address;
+    }
+    const liveAgent = sendTo ? (agents.find((a) => a.address === sendTo || a.pane === sendTo) ?? null) : null;
+    const known = c.store.profile(peerKey);
     c.store.upsertProfile(
       {
-        address,
+        address: peerKey,
         runtime: known?.runtime ?? liveAgent?.kind ?? "herdr",
         name: null,
         role: null,
@@ -540,8 +748,8 @@ function cmdSend(argv: string[]): number {
       false,
     );
     c.store.insertMessage({
-      sender,
-      recipient: address,
+      sender: senderKey,
+      recipient: peerKey,
       sender_name: statedName,
       sender_role: role,
       kind,
@@ -549,63 +757,71 @@ function cmdSend(argv: string[]): number {
       reply_to: replyTo,
       body: body.trim(),
     });
-    const unread = c.store.unreadTotal(address);
+    // The unread count comes from the same merged chats the peer will see.
+    cctx = canonCtx(c.store, agents);
+    const peerOwnerAliases = ownerView(peerKey, cctx).aliases;
+    const unread = inboxUnread(c.store, cctx, peerOwnerAliases);
 
     // The target reads this chat in the sender's database, unless its own squad is known
     // to be the same one; then the read command needs the --squad flag.
-    const refreshed = c.store.profile(address);
+    const refreshed = c.store.profile(peerKey);
     const targetRoot = refreshed?.cwd ? squadRoot(refreshed.cwd) : null;
     const atHome = targetRoot === c.store.root;
     const squadFlag = atHome ? "" : ` --squad ${shellWord(c.store.root)}`;
-    const displayName = statedName ?? tabNameOf((process.env.HC_TERMINAL_ID ?? "").trim()) ?? sender;
-    const chatSender = tabNameOf((process.env.HC_TERMINAL_ID ?? "").trim()) ?? sender;
+    // The display name is prose only: the read command and the footer carry
+    // the canonical key, which is always copy-pasteable.
+    const displayName = statedName ?? tabNameOf((process.env.HC_TERMINAL_ID ?? "").trim()) ?? senderRaw;
     const who = withRole(displayName, role);
     const text =
       `New message from ${who}. You have ${plural(unread, "unread message", "unread messages")} in your inbox. ` +
-      `Read it with: peers open ${chatSender}${squadFlag}`;
+      `Read it with: peers open ${shellWord(senderKey)}${squadFlag}`;
 
     const notifyFrom = (to: string): PromptFrom => ({
       name: displayName,
-      address: chatSender,
+      address: senderKey,
       targetKind: agents.find((a) => a.address === to || a.pane === to)?.kind,
     });
     const live = liveAgent !== null;
-    const profiles = c.store.contacts(sender);
+    const meAliases = lowerSet(ownerView(senderKey, cctx).aliases);
+    const profiles = c.store.contacts("").filter((pr) => !meAliases.has(pr.address.toLowerCase()));
+    // Prose names the target as typed (or its tab): the stored key and every
+    // printed command use the canonical peer key instead.
+    const displayTarget = tab.canonical ?? target;
     if (!live) {
       // The target may be a stale member address while the member runs on a
       // fresh terminal: follow it to the unique live terminal that runs it now.
-      const follow = followLiveTarget(c.store.root, address, agents, profiles);
+      const follow = followLiveTarget(c.store.root, peerKey, agents, profiles);
       if (follow.address !== "") {
         const done = prompt(follow.address, text, notifyFrom(follow.address));
         if (done.ok) {
-          console.log(`SENT ${address}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-            `${address} is not live, but ${follow.address} runs it now — ${done.detail}`);
+          console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+            `${displayTarget} is not live, but ${follow.address} runs it now — ${done.detail}`);
         } else {
-          console.log(`SENT ${target}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-            `queued, not delivered yet: ${address} is not live, and notifying ${follow.address} failed: ${done.detail}`);
+          console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+            `queued, not delivered yet: ${displayTarget} is not live, and notifying ${follow.address} failed: ${done.detail}`);
         }
       } else {
         const hint = follow.candidates.length > 1 ? ` Live terminals matching it: ${follow.candidates.join(", ")} — address one of them directly.` : "";
-        console.log(`SENT ${address}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-          `queued, not delivered yet: ${address} is not a live agent. It gets the notification when it runs and the next message arrives. No prompt was sent.${hint}`);
+        console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+          `queued, not delivered yet: ${displayTarget} is not a live agent. It gets the notification when it runs and the next message arrives. No prompt was sent.${hint}`);
       }
     } else {
-      const done = prompt(sendTo, text, notifyFrom(sendTo));
-      if (!done.ok) throw new Error(`the message is stored in ${address}'s inbox, but its notification failed: ${done.detail}`);
-      console.log(`SENT ${address}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ${done.detail}`);
+      const done = prompt(sendTo!, text, notifyFrom(sendTo!));
+      if (!done.ok) throw new Error(`the message is stored in ${peerKey}'s inbox, but its notification failed: ${done.detail}`);
+      console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ${done.detail}`);
     }
     // A replaced target never answers: name the session that holds its role now.
     {
-      const liveMap = liveness(c.store, sender, agents);
+      const liveMap = liveness(c.store, meAliases, agents, cctx);
       const flags = profiles.map((pr) => liveMap.get(pr.address) ?? false);
       const st = statuses(profiles, flags);
-      const i = profiles.findIndex((pr) => pr.address === address);
+      const i = profiles.findIndex((pr) => peerLow.has(pr.address.toLowerCase()));
       if (i >= 0) {
         const s = st[i]!;
         if (typeof s !== "string") {
           const role = profiles[i]!.role ?? "";
           console.log(
-            `REPLACED: ${address} no longer runs, and ${s.replaced} holds its role (${role}) now; it will not answer. ` +
+            `REPLACED: ${peerKey} no longer runs, and ${s.replaced} holds its role (${role}) now; it will not answer. ` +
               `Send this message to ${s.replaced} instead.`,
           );
         }
@@ -616,7 +832,7 @@ function cmdSend(argv: string[]): number {
     } else if (["request", "notice", "completion"].includes(kind)) {
       console.log(
         `REPLY: the notification of the answer arrives in this session as a new turn while it runs in herdr or herdr-core. ` +
-          `Read the answer then with \`peers open ${address}${squadFlag}\`. End your turn now. ` +
+          `Read the answer then with \`peers open ${shellWord(peerKey)}${squadFlag}\`. End your turn now. ` +
           `Do not sleep, poll, loop, re-read your inbox, list sessions or start a background task or timer to wait for it.`,
       );
     }
@@ -632,16 +848,17 @@ function cmdContacts(argv: string[]): number {
   if (p.positionals.length !== 0) throw new UsageError("contacts takes no arguments");
   const c = openCtx(str(p, "squad"), true);
   try {
-    const me = c.me;
     const agents = agentList();
-    const profiles = c.store.contacts(me).filter((pr) => pr.address !== me);
+    const cctx = canonCtx(c.store, agents);
+    const meAliases = lowerSet(ownerView(c.me, cctx).aliases);
+    const profiles = c.store.contacts("").filter((pr) => !meAliases.has(pr.address.toLowerCase()));
     if (profiles.length === 0) {
       console.log(
         `No contacts yet in ${c.store.root}: a peer appears here once it runs any peers command in this squad, or once you message it.`,
       );
       return 0;
     }
-    const liveMap = liveness(c.store, me, agents);
+    const liveMap = liveness(c.store, meAliases, agents, cctx);
     const flags = profiles.map((pr) => liveMap.get(pr.address) ?? false);
     const st = statuses(profiles, flags);
     const rank = (s: Status): number => (typeof s === "string" ? (s === "live" ? 0 : 1) : 2);
@@ -667,16 +884,19 @@ function cmdChats(argv: string[]): number {
   if (p.positionals.length !== 0) throw new UsageError("chats takes no arguments");
   const c = openCtx(str(p, "squad"), true);
   try {
-    const owner = c.me;
-    const chats = c.store.chats(owner);
-    const unread = c.store.unreadTotal(owner);
-    console.log(`INBOX ${owner} in ${c.store.root}: ${plural(unread, "unread message", "unread messages")} in ${plural(chats.length, "chat", "chats")}`);
+    const agents = agentList();
+    const cctx = canonCtx(c.store, agents);
+    const me = ownerView(c.me, cctx);
+    const chats = mergedChats(c.store, cctx, me.aliases);
+    const unread = chats.reduce((n, ch) => n + ch.unread, 0);
+    const ownLow = lowerSet(me.aliases);
+    console.log(`INBOX ${me.key} in ${c.store.root}: ${plural(unread, "unread message", "unread messages")} in ${plural(chats.length, "chat", "chats")}`);
     for (const ch of chats) {
       const { name, role } = label(ch.profile);
       const last = ch.last;
-      const from = last.sender === owner ? "you" : "them";
+      const from = ownLow.has(last.sender.toLowerCase()) ? "you" : "them";
       const kind =
-        last.sender === owner
+        ownLow.has(last.sender.toLowerCase())
           ? `${last.kind} seq ${last.seq}, ${last.read_at === null ? "not read yet" : `read ${localTime(last.read_at)}`}`
           : `${last.kind} seq ${last.seq}`;
       console.log(
@@ -684,7 +904,7 @@ function cmdChats(argv: string[]): number {
       );
     }
     const first = chats.find((ch) => ch.unread > 0) ?? chats[0];
-    if (first) console.log(`OPEN: peers open ${first.peer}${squadFlagOf(c.store.root, c.explicit)}`);
+    if (first) console.log(`OPEN: peers open ${shellWord(first.peer)}${squadFlagOf(c.store.root, c.explicit)}`);
     return 0;
   } finally {
     c.store.close();
@@ -698,12 +918,12 @@ interface Partner {
 }
 
 /** One message as a chat bubble, told from your side. */
-function render(m: Msg, owner: string, partner: Partner): void {
+function render(m: Msg, mine: boolean, partner: Partner): void {
   const day = localDate(m.sent_at);
   const meta: string[] = [`${m.kind} seq ${m.seq}`];
   if (m.reply_to) meta.push(`answer goes to ${m.reply_to}`);
   let who: string;
-  if (m.sender === owner) {
+  if (mine) {
     meta.push(
       m.read_at === null
         ? "not read yet"
@@ -726,54 +946,52 @@ function render(m: Msg, owner: string, partner: Partner): void {
   console.log("");
 }
 
-/** A name the squad knows: a live agent address or pane, or a stored profile.
- * Legacy terminal forms (pane ids, machine/terminal) keep their old path. */
-function isKnownPeer(agents: HerdrAgent[], store: Store, target: string): boolean {
-  if (target.includes(":") || target.includes("/")) return true;
-  if (agents.some((a) => a.address === target || a.pane === target)) return true;
-  return store.profile(target) !== null;
-}
-
 function cmdOpen(argv: string[]): number {
   const p = parseArgs(argv, ["page"]);
   unknownFlags(p, ["page", "squad"]);
   const target = p.positionals[0];
   if (!target || p.positionals.length !== 1) throw new UsageError("open needs exactly one <TARGET>");
-  const bad = checkTarget(target);
-  if (bad) throw new UsageError(bad);
-  const agents = agentList();
-  const tab = resolveTabAddress(target, agents.some((a) => a.address === target || a.pane === target));
+  checkAddressTarget(target);
+  const tab = resolveTabAddress(target, agentList().some((a) => a.address === target || a.pane === target));
   if (tab.error) throw new UsageError(tab.error);
-  const address = tab.canonical ?? target;
   const pageRaw = str(p, "page") ?? "1";
   const page = Number(pageRaw);
   if (!Number.isInteger(page) || page < 1) throw new UsageError(`bad --page ${JSON.stringify(pageRaw)}: expected an integer >= 1`);
   const c = openCtx(str(p, "squad"), true);
   try {
-    if (!tab.canonical && !isKnownPeer(agents, c.store, target)) {
+    const agents = agentList();
+    const cctx = canonCtx(c.store, agents);
+    const me = ownerView(c.me, cctx);
+    const ownLow = lowerSet(me.aliases);
+    const peer = peerView(tab.canonical ?? target, cctx);
+    // A quoted tab name with whitespace opens the same merged chat.
+    if (!tab.canonical && !isKnownPeer(tab.canonical ?? target, cctx, c.store)) {
       throw new UsageError(`no member, terminal or tab named ${JSON.stringify(target)}`);
     }
-    const owner = c.me;
-    const total = c.store.chatCount(owner, address);
+    const visible = visibleChat(c.store, cctx, me.aliases, peer.key);
+    const total = visible.length;
     if (total === 0) {
-      console.log(`No chat with ${address} in your inbox in ${c.store.root}.`);
+      console.log(`No chat with ${peer.key} in your inbox in ${c.store.root}.`);
       return 0;
     }
     const pages = Math.ceil(total / PAGE_SIZE);
     if (page > pages) {
       throw new UsageError(
-        `page ${page} does not exist: the chat with ${address} has ${plural(pages, "page", "pages")} of ${PAGE_SIZE} messages`,
+        `page ${page} does not exist: the chat with ${peer.key} has ${plural(pages, "page", "pages")} of ${PAGE_SIZE} messages`,
       );
     }
-    const msgs = c.store.page(owner, address, page);
-    const { name, role } = label(c.store.profile(address));
+    const start = Math.max(0, total - page * PAGE_SIZE);
+    const msgs = visible.slice(start, start + PAGE_SIZE);
+    const { name, role } = label(bestProfile(cctx, peer.aliases));
     const partner: Partner = { name, role };
     const last = total - (page - 1) * PAGE_SIZE;
     const first = last - msgs.length + 1;
-    if (name === "") console.log(`CHAT with ${address} (${role})`);
-    else console.log(`CHAT with ${withRole(name, role)} · ${address}`);
+    if (name === "") console.log(`CHAT with ${peer.key} (${role})`);
+    else console.log(`CHAT with ${withRole(name, role)} · ${peer.key}`);
     console.log(`page ${page} of ${pages}  (messages ${first}-${last} of ${total}, oldest first; page 1 holds the newest)\n`);
-    const unread = msgs.filter((m) => m.recipient === owner && m.read_at === null).length;
+    const mine = (m: Msg): boolean => ownLow.has(m.sender.toLowerCase());
+    const toMe = (m: Msg): boolean => ownLow.has(m.recipient.toLowerCase());
+    const unread = msgs.filter((m) => toMe(m) && m.read_at === null).length;
     let day = "";
     let divided = false;
     for (const m of msgs) {
@@ -782,24 +1000,24 @@ function cmdOpen(argv: string[]): number {
         console.log(`── ${d} ──\n`);
         day = d;
       }
-      if (!divided && m.recipient === owner && m.read_at === null) {
+      if (!divided && toMe(m) && m.read_at === null) {
         console.log(`── ${plural(unread, "unread message", "unread messages")} ──\n`);
         divided = true;
       }
-      render(m, owner, partner);
+      render(m, mine(m), partner);
     }
     c.store.markRead(
-      owner,
-      msgs.filter((m) => m.recipient === owner && m.read_at === null).map((m) => m.id),
+      me.aliases,
+      msgs.filter((m) => toMe(m) && m.read_at === null).map((m) => m.id),
     );
     const flag = squadFlagOf(c.store.root, c.explicit);
     if (page < pages) {
-      const older = c.store.unreadBefore(owner, address, msgs[0]!.id);
+      const older = visible.filter((m) => m.id < msgs[0]!.id && toMe(m) && m.read_at === null).length;
       const note = older > 0 ? `  (${plural(older, "unread message", "unread messages")} on older pages)` : "";
-      console.log(`OLDER: peers open ${address}${flag} --page ${page + 1}${note}`);
+      console.log(`OLDER: peers open ${shellWord(peer.key)}${flag} --page ${page + 1}${note}`);
     }
-    if (page > 1) console.log(`NEWER: peers open ${address}${flag} --page ${page - 1}`);
-    console.log(`INBOX: ${plural(c.store.unreadTotal(owner), "unread message", "unread messages")} left in your inbox`);
+    if (page > 1) console.log(`NEWER: peers open ${shellWord(peer.key)}${flag} --page ${page - 1}`);
+    console.log(`INBOX: ${plural(inboxUnread(c.store, cctx, me.aliases), "unread message", "unread messages")} left in your inbox`);
     return 0;
   } finally {
     c.store.close();
@@ -811,22 +1029,24 @@ function cmdDelete(argv: string[]): number {
   unknownFlags(p, ["squad"]);
   const target = p.positionals[0];
   if (!target || p.positionals.length !== 1) throw new UsageError("delete needs exactly one <TARGET>");
-  const bad = checkTarget(target);
-  if (bad) throw new UsageError(bad);
-  const agents = agentList();
-  const tab = resolveTabAddress(target, agents.some((a) => a.address === target || a.pane === target));
+  checkAddressTarget(target);
+  const tab = resolveTabAddress(target, agentList().some((a) => a.address === target || a.pane === target));
   if (tab.error) throw new UsageError(tab.error);
-  const address = tab.canonical ?? target;
   const c = openCtx(str(p, "squad"), true);
   try {
-    if (!tab.canonical && !isKnownPeer(agents, c.store, target)) {
+    const agents = agentList();
+    const cctx = canonCtx(c.store, agents);
+    const me = ownerView(c.me, cctx);
+    const peer = peerView(tab.canonical ?? target, cctx);
+    if (!tab.canonical && !isKnownPeer(tab.canonical ?? target, cctx, c.store)) {
       throw new UsageError(`no member, terminal or tab named ${JSON.stringify(target)}`);
     }
-    const n = c.store.deleteChat(c.me, address);
-    if (n === 0) console.log(`No chat with ${address} in your inbox; nothing deleted.`);
+    const visible = visibleChat(c.store, cctx, me.aliases, peer.key);
+    const n = c.store.hideChat(me.key, peer.key, visible);
+    if (n === 0) console.log(`No chat with ${peer.key} in your inbox; nothing deleted.`);
     else {
       console.log(
-        `DELETED your view of the chat with ${address}: ${plural(n, "message", "messages")} hidden from you; ${address} still sees the whole chat.`,
+        `DELETED your view of the chat with ${peer.key}: ${plural(n, "message", "messages")} hidden from you; ${peer.key} still sees the whole chat.`,
       );
     }
     return 0;

@@ -141,12 +141,11 @@ function rowToProfile(r: Record<string, unknown>): Profile {
   };
 }
 
-/// The messages of one chat as `owner` sees it.
-function chatWhere(owner: string, peer: string): { sql: string; params: (string | number)[] } {
-  return {
-    sql: "((sender = ? AND recipient = ?) OR (sender = ? AND recipient = ?)) AND id > COALESCE((SELECT before_id FROM cleared WHERE owner = ? AND peer = ?), 0)",
-    params: [owner, peer, peer, owner, owner, peer],
-  };
+/// An `IN` list matched case-insensitively: every spelling of one peer's
+/// address set compares equal however it was capitalised or stored.
+function lowerList(vals: string[]): { list: string; params: string[] } {
+  const uniq = [...new Set(vals.map((v) => v.toLowerCase()))];
+  return { list: uniq.map(() => "?").join(","), params: uniq };
 }
 
 export class Store {
@@ -233,92 +232,49 @@ export class Store {
     return (this.db.query("SELECT last_insert_rowid() AS id").get() as { id: number }).id;
   }
 
-  /** Unread messages to `owner` across its whole inbox, leaving out chats it deleted. */
-  unreadTotal(owner: string): number {
-    const r = this.db
-      .query(
-        `SELECT COUNT(*) AS n FROM messages m WHERE m.recipient = ? AND m.read_at IS NULL
-         AND m.id > COALESCE((SELECT before_id FROM cleared WHERE owner = ? AND peer = m.sender), 0)`,
-      )
-      .get(owner, owner) as { n: number };
-    return r.n;
-  }
-
-  chatCount(owner: string, peer: string): number {
-    const w = chatWhere(owner, peer);
-    const r = this.db.query(`SELECT COUNT(*) AS n FROM messages WHERE ${w.sql}`).get(...w.params) as {
-      n: number;
-    };
-    return r.n;
-  }
-
-  /** Page `page` of a chat (1 is the newest), oldest message first. */
-  page(owner: string, peer: string, page: number): Msg[] {
-    const w = chatWhere(owner, peer);
+  /** Every message `owner` (under any of its alias spellings) takes part in,
+   * oldest first. Deletion filtering happens in the caller, which knows each
+   * peer's canonical key. */
+  messagesForOwners(owners: string[]): Msg[] {
+    const o = lowerList(owners);
     const rows = this.db
-      .query(`SELECT ${MSG_COLS} FROM messages WHERE ${w.sql} ORDER BY id DESC LIMIT ? OFFSET ?`)
-      .all(...w.params, PAGE_SIZE, (page - 1) * PAGE_SIZE) as Record<string, unknown>[];
-    return rows.map(rowToMsg).reverse();
-  }
-
-  /** Unread messages from `peer` to `owner` older than message `id`. */
-  unreadBefore(owner: string, peer: string, id: number): number {
-    const w = chatWhere(owner, peer);
-    const r = this.db
-      .query(`SELECT COUNT(*) AS n FROM messages WHERE ${w.sql} AND recipient = ? AND read_at IS NULL AND id < ?`)
-      .get(...w.params, owner, id) as { n: number };
-    return r.n;
-  }
-
-  markRead(owner: string, ids: number[]): void {
-    if (ids.length === 0) return;
-    const stmt = this.db.query("UPDATE messages SET read_at = ? WHERE id = ? AND recipient = ? AND read_at IS NULL");
-    const now = nowMs();
-    const tx = this.db.transaction((list: number[]) => {
-      for (const id of list) stmt.run(now, id, owner);
-    });
-    tx(ids);
-  }
-
-  /** Every chat `owner` can see, the most recent first. */
-  chats(owner: string): Chat[] {
-    const raw = this.db
       .query(
-        `WITH mine AS (
-           SELECT m.id, m.recipient, m.read_at,
-                  CASE WHEN m.sender = ? THEN m.recipient ELSE m.sender END AS peer
-           FROM messages m WHERE m.sender = ? OR m.recipient = ?)
-         SELECT peer, COUNT(*) AS total, SUM(CASE WHEN recipient = ? AND read_at IS NULL THEN 1 ELSE 0 END) AS unread, MAX(id) AS last_id
-         FROM mine
-         WHERE id > COALESCE((SELECT before_id FROM cleared WHERE owner = ? AND peer = mine.peer), 0)
-         GROUP BY peer ORDER BY MAX(id) DESC`,
+        `SELECT ${MSG_COLS} FROM messages WHERE LOWER(sender) IN (${o.list}) OR LOWER(recipient) IN (${o.list}) ORDER BY id ASC`,
       )
-      .all(owner, owner, owner, owner, owner) as { peer: string; total: number; unread: number; last_id: number }[];
-    const out: Chat[] = [];
-    for (const r of raw) {
-      const last = this.db.query(`SELECT ${MSG_COLS} FROM messages WHERE id = ?`).get(r.last_id) as Record<
-        string,
-        unknown
-      >;
-      out.push({ peer: r.peer, total: r.total, unread: r.unread, last: rowToMsg(last), profile: this.profile(r.peer) });
-    }
-    return out;
+      .all(...o.params, ...o.params) as Record<string, unknown>[];
+    return rows.map(rowToMsg);
   }
 
-  /** Hides every message of the chat so far from `owner` only; returns how many were visible. */
-  deleteChat(owner: string, peer: string): number {
-    const w = chatWhere(owner, peer);
-    const r = this.db.query(`SELECT COUNT(*) AS n, MAX(id) AS max_id FROM messages WHERE ${w.sql}`).get(
-      ...w.params,
-    ) as { n: number; max_id: number | null };
-    if (r.max_id !== null) {
+  /** Deletion markers for owner aliases: which peer views were cleared, and how far. */
+  clearedForOwners(owners: string[]): { owner: string; peer: string; before_id: number }[] {
+    const o = lowerList(owners);
+    return this.db.query(`SELECT owner, peer, before_id FROM cleared WHERE LOWER(owner) IN (${o.list})`).all(
+      ...o.params,
+    ) as { owner: string; peer: string; before_id: number }[];
+  }
+
+  markRead(owners: string[], ids: number[]): void {
+    if (ids.length === 0) return;
+    const o = lowerList(owners);
+    this.db
+      .query(
+        `UPDATE messages SET read_at = ? WHERE id IN (${ids.map(() => "?").join(",")}) AND LOWER(recipient) IN (${o.list}) AND read_at IS NULL`,
+      )
+      .run(nowMs(), ...ids, ...o.params);
+  }
+
+  /** Hides every visible message of the chat so far from `owner` only; returns
+   * how many were visible. `visible` is the caller's cleared-filtered list;
+   * the marker is recorded under the canonical pair. */
+  hideChat(primaryOwner: string, primaryPeer: string, visible: Msg[]): number {
+    if (visible.length > 0) {
       this.db
         .query(
           `INSERT INTO cleared (owner, peer, before_id) VALUES (?, ?, ?)
-           ON CONFLICT(owner, peer) DO UPDATE SET before_id = excluded.before_id`,
+           ON CONFLICT(owner, peer) DO UPDATE SET before_id = MAX(cleared.before_id, excluded.before_id)`,
         )
-        .run(owner, peer, r.max_id);
+        .run(primaryOwner, primaryPeer, visible[visible.length - 1]!.id);
     }
-    return r.n;
+    return visible.length;
   }
 }

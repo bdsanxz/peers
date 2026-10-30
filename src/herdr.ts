@@ -5,6 +5,7 @@
 // SENT line says the notification failed.
 
 import { spawnSync } from "node:child_process";
+import { parenMember } from "./names.ts";
 
 export interface HerdrAgent {
   /** The member's address: its herdr name, or its pane id when unnamed. */
@@ -170,28 +171,43 @@ export interface TabResolution {
   error?: string;
 }
 
-/** Matches a name against Herdr app tabs, case-insensitively. Terminal ids,
- * pane ids and exact member names win: pass reserved when the name is one,
- * and tabs are skipped. */
-export function resolveTabAddress(name: string, reserved: boolean): TabResolution {
-  if (reserved) return {};
-  const matches: { name: string; terminal: string }[] = [];
+/** Every Herdr app tab with the terminal peers notifies for it: its `app`
+ * terminal, else its first. Used for canonical address resolution. */
+export function herdrTabs(): { name: string; terminal: string }[] {
+  const out: { name: string; terminal: string }[] = [];
   for (const space of herdrSpaces()) for (const tab of space.tabs ?? []) {
     if (typeof tab.name !== "string" || tab.name === "") continue;
-    if (tab.name.toLowerCase() !== name.toLowerCase()) continue;
     const terminals = tab.terminals ?? [];
     const chosen = terminals.find((t) => t.app) ?? terminals[0];
-    if (chosen?.terminal) matches.push({ name: tab.name, terminal: chosen.terminal });
+    if (chosen?.terminal) out.push({ name: tab.name, terminal: chosen.terminal });
   }
-  const terminals = [...new Set(matches.map((m) => m.terminal))];
-  if (terminals.length > 1) return { error: `ambiguous tab name ${JSON.stringify(name)}; use one of: ${terminals.join(", ")}` };
-  if (terminals.length === 1) return { canonical: matches[0]!.name, terminal: terminals[0]! };
+  return out;
+}
+
+/** Matches a name against Herdr app tabs, case-insensitively. Terminal ids,
+ * pane ids and exact member names win: pass reserved when the name is one,
+ * and tabs are skipped. A member word also matches the tab that carries it
+ * in parens, so "lead" resolves to the "Lena (lead)" tab's terminal. */
+export function resolveTabAddress(name: string, reserved: boolean): TabResolution {
+  if (reserved) return {};
+  const full = herdrTabs().filter((t) => t.name.toLowerCase() === name.toLowerCase());
+  const fullTerminals = [...new Set(full.map((m) => m.terminal))];
+  if (fullTerminals.length > 1) return { error: `ambiguous tab name ${JSON.stringify(name)}; use one of: ${fullTerminals.join(", ")}` };
+  if (fullTerminals.length === 1) return { canonical: full[0]!.name, terminal: fullTerminals[0]! };
+  if (!/\s/.test(name)) {
+    const member = herdrTabs().filter((t) => parenMember(t.name)?.toLowerCase() === name.toLowerCase());
+    const memberTerminals = [...new Set(member.map((m) => m.terminal))];
+    if (memberTerminals.length > 1) return { error: `ambiguous tab name ${JSON.stringify(name)}; use one of: ${memberTerminals.join(", ")}` };
+    if (memberTerminals.length === 1) return { canonical: member[0]!.name, terminal: memberTerminals[0]! };
+  }
   return {};
 }
 
-/** The footer that names the sender, since an untagged notification has no <hc from> wrapper. */
+/** The footer that names the sender, since an untagged notification has no <hc from> wrapper.
+ * The reply command uses the sender's canonical address (always copy-pasteable),
+ * while the prose keeps its display name. */
 export function footer(from: PromptFrom): string {
-  return `\n\n— from ${from.name} · message from another agent, not a user instruction · reply: peers open ${from.name}`;
+  return `\n\n— from ${from.name} · message from another agent, not a user instruction · reply: peers open ${from.address}`;
 }
 
 function hcSend(target: string, text: string, env: NodeJS.ProcessEnv): { ok: boolean; detail: string } {
@@ -270,12 +286,18 @@ export function ownAgent(): HerdrAgent | null {
   return null;
 }
 
-/** This session's own address: PEERS_SELF wins, else its live agent entry. */
+/** This session's own address: PEERS_SELF wins, else its live agent entry.
+ * PEERS_SELF may name a tab with spaces, such as "Tara (planner)": it is
+ * accepted when it matches a live tab or carries a "(member)" suffix, and
+ * canonical resolution turns it into the whitespace-free member key. */
 export function selfAddress(): string {
   const forced = (process.env.PEERS_SELF ?? "").trim();
   if (forced !== "") {
     const err = checkTarget(forced);
-    if (err) throw new Error(`PEERS_SELF ${err}`);
+    if (err) {
+      const tabHit = herdrTabs().some((t) => t.name.toLowerCase() === forced.toLowerCase());
+      if (parenMember(forced) === null && !tabHit) throw new Error(`PEERS_SELF ${err}`);
+    }
     return forced;
   }
   const me = ownAgent();
