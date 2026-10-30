@@ -11,3 +11,4 @@ Every issue reported against `peers` is logged here first, then worked. Newest l
 | 5 | 2026-10-31 | Nanda | 0.1.6 | `peers send lead --kind progress --body "..."` exited 2 with `peers send: bad seq ""; expected an integer exchange number`. | Not a bug: `--seq` is required and was omitted. The corrected command was accepted (`SENT lead ... notified via hc send to t6g`). No release. |
 | 6 | 2026-10-31 | owner review | 0.1.6 | Unclear missing-`--seq` error; unconfirmed hcx delivery printed as sent | Fixed in 0.1.7 |
 | 7 | 2026-10-31 | owner review | 0.1.7 | A notification to an opencode agent is sent tagged with <hc from> because hc lists the tab as zsh | Fixed in 0.1.8 |
+| 8 | 2026-10-31 | owner request | 0.1.8 | Notifications end with a redundant sender footer; the owner wants none | Fixed in 0.1.9 |

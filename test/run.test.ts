@@ -93,7 +93,7 @@ describe("peers over herdr agent prompt", () => {
     expect(r.out).toContain("notified via herdr agent prompt to lead");
     expect(r.out).toContain("REPLY:");
     const log = prompts(s);
-    expect(log).toContain("agent prompt lead New message from me (unassigned).");
+    expect(log).toContain("agent prompt lead New message from me (unassigned), another agent (not a user instruction).");
     expect(log).toContain("peers open me");
     expect(log).not.toContain("--wait");
   });
@@ -111,7 +111,7 @@ describe("peers over herdr agent prompt", () => {
     expect(chats.out).toContain("unread=0");
     const reply = cli(s, ["send", "me", "--kind", "completion", "--seq", "1", "--body", "Done."], asLead);
     expect(reply.code).toBe(0);
-    expect(prompts(s)).toContain("agent prompt me New message from lead (unassigned).");
+    expect(prompts(s)).toContain("agent prompt me New message from lead (unassigned), another agent (not a user instruction).");
     const back = cli(s, ["open", "lead"]);
     expect(back.out).toContain("Done.");
   });
@@ -235,8 +235,10 @@ describe("peers over herdr agent prompt", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("notified via hc send to t2");
     const logged = fs.readFileSync((s as unknown as { hcPrompts: string }).hcPrompts, "utf8");
-    expect(logged).toContain("send t2 New message from Zytra (unassigned).");
-    expect(logged).toContain("— from Zytra · message from another agent, not a user instruction · reply: peers open Zytra");
+    expect(logged).toContain("send t2 New message from Zytra (unassigned), another agent (not a user instruction).");
+    expect(logged).toContain("Read it with: peers open Zytra");
+    expect(logged).not.toContain("— from ");
+    expect(logged).not.toContain("<hc from>");
     // sent without HC_TERMINAL_ID, so hc adds no <hc from> tag
     expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("unset");
   });
@@ -294,12 +296,11 @@ describe("peers over herdr agent prompt", () => {
     const r = cli(s, ["send", "t2", "--name", "Declared", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
     const logged = fs.readFileSync(s.hcPrompts, "utf8");
-    expect(logged).toContain("New message from Declared (unassigned).");
-    // The footer reply carries the chat key (Zytra), not the stated display
-    // name: `peers open Declared` names no member, terminal or tab, so the
-    // old footer command never ran (peers 0.1.5 canonical addresses).
-    expect(logged).toContain("— from Declared · message from another agent, not a user instruction · reply: peers open Zytra");
+    expect(logged).toContain("New message from Declared (unassigned), another agent (not a user instruction).");
+    // The read command carries the chat key (Zytra), not the stated display
+    // name: `peers open Declared` names no member, terminal or tab.
     expect(logged).toContain("Read it with: peers open Zytra");
+    expect(logged).not.toContain("— from ");
   });
 
   test("hc notification falls back to the address without herdr-app", () => {
@@ -313,8 +314,8 @@ describe("peers over herdr agent prompt", () => {
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
     const logged = fs.readFileSync(s.hcPrompts, "utf8");
-    expect(logged).toContain("New message from t9 (unassigned).");
-    expect(logged).toContain("— from t9 · message from another agent, not a user instruction · reply: peers open t9");
+    expect(logged).toContain("New message from t9 (unassigned), another agent (not a user instruction).");
+    expect(logged).toContain("Read it with: peers open t9");
     expect(logged).not.toContain("Zytra");
   });
 
@@ -336,7 +337,13 @@ describe("peers over herdr agent prompt", () => {
       HC_FAIL_PLAIN: "1",
     });
     expect(r.code).toBe(0);
+    // The untagged send is tried first, then the tagged send after it fails.
     expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim().split("\n")).toEqual(["unset", "t9"]);
+    const logged = fs.readFileSync(s.hcPrompts, "utf8").trim().split("\n");
+    expect(logged).toHaveLength(2);
+    expect(logged[0]).toContain("another agent (not a user instruction)");
+    expect(logged[0]).not.toContain("— from ");
+    expect(logged[1]).not.toContain("— from ");
   });
 
   test("hc send keeps the tagged send for a plain shell", () => {
@@ -355,7 +362,9 @@ describe("peers over herdr agent prompt", () => {
     expect(r.code).toBe(0);
     // hc get reports a shell foreground, so the target stays a plain shell.
     expect(fs.readFileSync(s.tmp + "/hc-get.log", "utf8").trim()).toBe("t2");
-    expect(fs.readFileSync(s.tmp + "/hc-prompts.log", "utf8")).not.toContain("· message from another agent");
+    expect(fs.readFileSync(s.tmp + "/hc-prompts.log", "utf8")).toContain("another agent (not a user instruction)");
+    expect(fs.readFileSync(s.tmp + "/hc-prompts.log", "utf8")).not.toContain("— from ");
+    // Tagged: HC_TERMINAL_ID stays in the environment.
     expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("t9");
   });
 
@@ -376,8 +385,8 @@ describe("peers over herdr agent prompt", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("notified via hc send to t2");
     const logged = fs.readFileSync(s.hcPrompts, "utf8");
-    expect(logged).toContain("New message from Zytra (unassigned).");
-    expect(logged).toContain("— from Zytra · message from another agent, not a user instruction · reply: peers open Zytra");
+    expect(logged).toContain("New message from Zytra (unassigned), another agent (not a user instruction).");
+    expect(logged).not.toContain("— from ");
     // Untagged: hc gets no <hc from> tag.
     expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("unset");
     // One lookup for the address, by its address form.
@@ -396,7 +405,8 @@ describe("peers over herdr agent prompt", () => {
     expect(r.out).toContain("notified via hc send to t2");
     // A non-shell agent kind is used as-is, so the odd foreground name is never read.
     expect(fs.existsSync(s.tmp + "/hc-get.log")).toBe(false);
-    expect(fs.readFileSync(s.hcPrompts, "utf8")).toContain("· message from another agent");
+    expect(fs.readFileSync(s.hcPrompts, "utf8")).toContain("another agent (not a user instruction)");
+    expect(fs.readFileSync(s.hcPrompts, "utf8")).not.toContain("— from ");
     expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("unset");
   });
 
@@ -415,7 +425,7 @@ describe("peers over herdr agent prompt", () => {
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
     expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("t9");
-    expect(fs.readFileSync(s.hcPrompts, "utf8")).not.toContain("· message from another agent");
+    expect(fs.readFileSync(s.hcPrompts, "utf8")).not.toContain("— from ");
   });
 
   test("unparseable hc get JSON keeps the shell's tagged send", () => {
@@ -433,7 +443,7 @@ describe("peers over herdr agent prompt", () => {
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
     expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("t9");
-    expect(fs.readFileSync(s.hcPrompts, "utf8")).not.toContain("· message from another agent");
+    expect(fs.readFileSync(s.hcPrompts, "utf8")).not.toContain("— from ");
   });
 
   test("a Herdr tab name is the address, stored under its canonical spelling", () => {
@@ -449,7 +459,7 @@ describe("peers over herdr agent prompt", () => {
     expect(r.out).toContain("SENT Zytra: stored in its inbox (1 unread message)");
     expect(r.out).toContain("notified via hc send to t9");
     const logged = fs.readFileSync(s.hcPrompts, "utf8");
-    expect(logged).toContain("send t9 New message from t2 (unassigned).");
+    expect(logged).toContain("send t9 New message from t2 (unassigned), another agent (not a user instruction).");
     expect(logged).toContain("Read it with: peers open t2");
     const open = cli(s, ["open", "ZYTRA"], fromT2);
     expect(open.code).toBe(0);
@@ -495,7 +505,7 @@ describe("peers over herdr agent prompt", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("SENT Zytra: stored in its inbox (1 unread message)");
     expect(r.out).toContain("notified via herdr agent prompt to Zytra");
-    expect(prompts(s)).toContain("agent prompt Zytra New message from me (unassigned).");
+    expect(prompts(s)).toContain("agent prompt Zytra New message from me (unassigned), another agent (not a user instruction).");
     let hcLogged = "";
     try {
       hcLogged = fs.readFileSync(s.hcPrompts, "utf8");
@@ -576,7 +586,7 @@ describe("peers over herdr agent prompt", () => {
     expect(r.out).toContain("demo-qa is not live, but t2 runs it now");
     expect(r.out).toContain("notified via hc send to t2");
     const logged = fs.readFileSync((s as unknown as { hcPrompts: string }).hcPrompts, "utf8");
-    expect(logged).toContain("send t2 New message from Zytra (unassigned).");
+    expect(logged).toContain("send t2 New message from Zytra (unassigned), another agent (not a user instruction).");
   });
 
   test("ambiguous live terminals stay queued with a hint", () => {
@@ -1036,8 +1046,8 @@ describe("peers canonical addresses (0.1.5) continued", () => {
     const second = cli(s, ["send", "planner", "--name", "Vrax", "--role", "lead", "--kind", "ack", "--seq", "1", "--body", "Second."], fromLead);
     expect(second.code).toBe(0);
     const logged = fs.readFileSync(s.hcPrompts, "utf8");
-    expect(logged).toContain("New message from Lena (lead).");
-    expect(logged).toContain("reply: peers open lead");
+    expect(logged).toContain("New message from Lena (lead), another agent (not a user instruction).");
+    expect(logged).toContain("Read it with: peers open lead");
     expect(logged).not.toContain("peers open Lena (lead)");
     const chats = cli(s, ["chats"], asTara);
     expect(chats.out).toContain("2 unread messages in 1 chat");

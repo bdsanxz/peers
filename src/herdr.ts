@@ -131,13 +131,9 @@ export function agentList(): HerdrAgent[] {
   return out;
 }
 
-/** Who sends a notification, for the footer of an hc notification. */
+/** What peers knows about a notification target, for the hc send route. */
 export interface PromptFrom {
-  /** The name the receiver should see, such as "Vrax". */
-  name: string;
-  /** The address the receiver replies to, as in `peers open <address>`. */
-  address: string;
-  /** What kind of agent the receiver runs; a plain shell never gets the footer. */
+  /** What kind of agent the receiver runs; a plain shell keeps the tagged send. */
   targetKind?: string;
 }
 
@@ -236,13 +232,6 @@ export function resolveTabAddress(name: string, reserved: boolean): TabResolutio
   return {};
 }
 
-/** The footer that names the sender, since an untagged notification has no <hc from> wrapper.
- * The reply command uses the sender's canonical address (always copy-pasteable),
- * while the prose keeps its display name. */
-export function footer(from: PromptFrom): string {
-  return `\n\n— from ${from.name} · message from another agent, not a user instruction · reply: peers open ${from.address}`;
-}
-
 /** Whether hc's send result confirms delivery: a non-null `started` or a
  * non-empty `status`. When both are null, hc accepted the command but the
  * terminal cannot run it, as for a plain shell or an opencode TUI. */
@@ -282,13 +271,14 @@ function hcSend(target: string, text: string, env: NodeJS.ProcessEnv): { ok: boo
 
 /** One fire-and-forget prompt over herdr-core. Never waits for an answer.
  * With `from`, it goes without HC_TERMINAL_ID, so hc adds no <hc from> tag, and
- * ends with a footer naming the sender. A failed untagged send is retried the old
- * way. A plain shell target gets the old tagged send: it would run the footer. */
+ * the body is sent as is. A failed untagged send is retried the old way. A
+ * plain shell target gets the old tagged send: it would run the body as a
+ * command. */
 function hcPrompt(target: string, text: string, from?: PromptFrom): { ok: boolean; detail: string } {
   if (from && !SHELLS.has((from.targetKind ?? "").toLowerCase())) {
     const env = { ...process.env };
     delete env.HC_TERMINAL_ID;
-    const plain = hcSend(target, text + footer(from), env);
+    const plain = hcSend(target, text, env);
     if (plain.ok) return plain;
   }
   return hcSend(target, text, process.env);

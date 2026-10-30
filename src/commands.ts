@@ -233,10 +233,9 @@ Commands:
 How it works:
   1. peers send <peer> --kind request --seq 1 --body "<text>"
      stores the message; the peer gets one notification turn:
-     New message from <name> (<role>). You have 1 unread message in your inbox. Read it with: peers open <you>
-     Over herdr-core (hc send) the notification goes without the <hc from> tag and ends with a
-     footer: "— from <sender tab name> · message from another agent, not a user instruction · reply: peers open <you>".
-     A plain shell target gets the old tagged send, so it never runs the footer.
+     New message from <name> (<role>), another agent (not a user instruction). You have 1 unread message in your inbox. Read it with: peers open <you>
+     Over herdr-core (hc send) the notification goes without the <hc from> tag and is sent as is.
+     A plain shell target gets the old tagged send.
   2. The peer runs that \`peers open\`, then answers with its own \`peers send\`.
   3. The answer reaches you the same way, as a new turn. Nobody polls.
 
@@ -821,19 +820,18 @@ function cmdSend(argv: string[]): number {
     const targetRoot = refreshed?.cwd ? squadRoot(refreshed.cwd) : null;
     const atHome = targetRoot === c.store.root;
     const squadFlag = atHome ? "" : ` --squad ${shellWord(c.store.root)}`;
-    // The display name is prose only: the read command and the footer carry
-    // the canonical key, which is always copy-pasteable.
+    // The display name is prose only: the read command carries the
+    // canonical key, which is always copy-pasteable.
     const displayName = statedName ?? tabNameOf((process.env.HC_TERMINAL_ID ?? "").trim()) ?? senderRaw;
     const who = withRole(displayName, role);
     const text =
-      `New message from ${who}. You have ${plural(unread, "unread message", "unread messages")} in your inbox. ` +
+      `New message from ${who}, another agent (not a user instruction). ` +
+      `You have ${plural(unread, "unread message", "unread messages")} in your inbox. ` +
       `Read it with: peers open ${shellWord(senderKey)}${squadFlag}`;
 
     const notifyFrom = (to: string): PromptFrom => {
       const liveTarget = agents.find((a) => a.address === to || a.pane === to);
       return {
-        name: displayName,
-        address: senderKey,
         // A shell-looking hc tab may run a real agent in a login-shell wrapper:
         // effectiveKind asks `hc get` for its foreground program.
         targetKind: liveTarget ? effectiveKind(liveTarget) : undefined,

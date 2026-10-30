@@ -3,7 +3,7 @@
 An inbox messenger between agent sessions in one herdr workspace. One session sends a message with `peers send`. The message is stored in a chat that keeps its whole history, and the receiver gets one notification as an ordinary turn — delivered with a single fire-and-forget `herdr agent prompt`, never `--wait`:
 
 ```
-New message from Rina (backend). You have 3 unread messages in your inbox. Read it with: peers open rina
+New message from Rina (backend), another agent (not a user instruction). You have 3 unread messages in your inbox. Read it with: peers open rina
 ```
 
 The receiver reads the chat with `peers open` and answers with its own `peers send`. Nobody polls: after a send, end your turn; the answer arrives as a turn.
@@ -84,7 +84,7 @@ Conversations and peer profiles live in one SQLite database per squad, at `~/.lo
 - **Deleting a chat** records how far the deleter's view is cleared. The other side's view stays unchanged.
 - **No notification queue.** Delivery is one `herdr agent prompt` at send time. When the peer is not live or the prompt fails, the message simply waits in the inbox; the next send's notification carries the waiting count.
 
-- **hc notifications carry a footer, not a tag.** Over `hc send` the notification is sent without `HC_TERMINAL_ID`, so hc adds no `<hc from>` tag, and it ends with `— from <sender tab name> · message from another agent, not a user instruction · reply: peers open <sender>`. The tab name comes from `herdr-app ls` (the display name stated with `--name` wins; the address is the last fallback). A tab with several terminals is notified on the one with the `app` field, and renaming a tab starts a new chat. If the untagged send fails, `peers` retries the old tagged send. An `hc send` that exits 0 but returns no `started` or `status` confirms no delivery, so the `SENT` line says `(delivery not confirmed by hcx)` instead of claiming the peer was notified. A shell-looking tab is checked against `hc get` before the tagged send: when hc lists a tab as a shell (`zsh`, `sh`, `bash`, ...) but its foreground program is a real agent running inside a login-shell wrapper (such as `opencode`), it gets the untagged send with the footer like any other agent. A plain shell — an empty or shell foreground, or no `hc get` answer — always gets the old tagged send, because it would run the footer as a command.
+- **hc notifications are untagged.** Over `hc send` the notification is sent without `HC_TERMINAL_ID`, so hc adds no `<hc from>` tag, and the body is sent as is; it already says it comes from another agent, not a user instruction. The sender's display name comes from `herdr-app ls` (the display name stated with `--name` wins; the address is the last fallback). A tab with several terminals is notified on the one with the `app` field, and renaming a tab starts a new chat. If the untagged send fails, `peers` retries the old tagged send. An `hc send` that exits 0 but returns no `started` or `status` confirms no delivery, so the `SENT` line says `(delivery not confirmed by hcx)` instead of claiming the peer was notified. A shell-looking tab is checked against `hc get` before the tagged send: when hc lists a tab as a shell (`zsh`, `sh`, `bash`, ...) but its foreground program is a real agent running inside a login-shell wrapper (such as `opencode`), it gets the untagged send like any other agent. A plain shell — an empty or shell foreground, or no `hc get` answer — always gets the old tagged send, because it would run the text as a command.
 
 Environment variables:
 
