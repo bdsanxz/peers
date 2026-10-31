@@ -163,16 +163,35 @@ function displayMember(m: string, ctx: CanonCtx): string {
   return m;
 }
 
+/** Per-command memo of `primary()` by spelling: one process runs one command,
+ * so the map lives for the process and needs no invalidation. Reads call it
+ * once per message; the cache turns O(messages x identities) scans into
+ * map lookups with identical results. */
+const primaryCache = new Map<string, string>();
+
+/** Clears the per-command `primary()` memo. Called once per command so a
+ * long-lived importer never reuses a stale spelling. */
+export function clearPrimaryCache(): void {
+  primaryCache.clear();
+}
+
 /** The preferred storage and display key for a spelling: the canonical member
  * when one is known (always whitespace-free), else the live tab's spelling
  * (such as "Zytra"), else the spelling as typed. */
 export function primary(spelling: string, ctx: CanonCtx): string {
   const t = spelling.trim();
+  const key = t.toLowerCase();
+  const hit = primaryCache.get(key);
+  if (hit !== undefined) return hit;
   const m = memberOf(t, ctx);
-  if (m !== null) return displayMember(m, ctx);
-  const tab = ctx.tabs.find((x) => x.name.toLowerCase() === t.toLowerCase());
-  if (tab) return tab.name;
-  return t;
+  let out: string;
+  if (m !== null) out = displayMember(m, ctx);
+  else {
+    const tab = ctx.tabs.find((x) => x.name.toLowerCase() === t.toLowerCase());
+    out = tab ? tab.name : t;
+  }
+  primaryCache.set(key, out);
+  return out;
 }
 
 /** Every spelling that names the same peer as `spelling`: itself, its member

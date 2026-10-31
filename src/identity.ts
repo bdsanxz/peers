@@ -95,6 +95,45 @@ export function register(store: Store, me: string, dir: string, kind: string): v
   );
 }
 
+/** Records the session's profile only when it changed: a read-only command
+ * (`chats`, `open`, `contacts`) leaves the database alone when the stored
+ * profile already carries the same name, role and directory, so a second
+ * read leaves `data_version` unchanged. Returns true when it wrote. */
+export function registerIfChanged(store: Store, me: string, dir: string, kind: string): boolean {
+  const { role, name } = ownIdentity(undefined, undefined, [process.cwd(), dir]);
+  const overwrite = role !== null;
+  let key = me;
+  try {
+    key = primary(me, loadCtx(store.root, agentList(), store.contacts("")));
+  } catch {
+    // canonical resolution is best-effort; the raw spelling still registers
+  }
+  let prev = null;
+  try {
+    prev = store.profile(key);
+  } catch {
+    prev = null;
+  }
+  if (prev !== null) {
+    const sameCwd = (prev.cwd ?? null) === (dir ?? null);
+    const sameName = (prev.name ?? null) === (name ?? null);
+    const sameRole = (prev.role ?? null) === (role ?? null);
+    if (overwrite) {
+      if (sameName && sameRole && sameCwd) return false;
+    } else {
+      // Without a stated role only missing values are filled: skip when
+      // there is nothing new (no fresh name, directory unchanged).
+      const fillsName = prev.name === null && name !== null;
+      if (!fillsName && sameCwd) return false;
+    }
+  }
+  store.upsertProfile(
+    { address: key, runtime: kind, name, role, cwd: dir, updated_at: nowMs() },
+    overwrite,
+  );
+  return true;
+}
+
 /** This session's directory and herdr kind, for its context. */
 export function ownContext(): { me: string; dir: string; kind: string } {
   const me = selfAddress();

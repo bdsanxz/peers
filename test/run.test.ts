@@ -1319,3 +1319,200 @@ describe("peers 0.1.10 help safety and notification correctness", () => {
     expect(missing.err).toContain("no such directory");
   });
 });
+
+describe("peers 0.1.11 fewer calls, timeouts, lighter SQLite", () => {
+  function countingSetup(): { tmp: string; bin: string; squad: string; calls: string; prompts: string; hcPrompts: string } {
+    const s = setup();
+    const calls = path.join(s.tmp, "calls.log");
+    fs.writeFileSync(calls, "");
+    const wrap = (name: string, inner: string): void => {
+      const p = path.join(s.bin, name);
+      const prev = fs.readFileSync(p, "utf8");
+      // Log every invocation, then run the previous stub body.
+      const body = prev
+        .split("\n")
+        .filter((l) => l !== "#!/bin/bash")
+        .join("\n");
+      fs.writeFileSync(
+        p,
+        `#!/bin/bash\nprintf '%s\\n' "${name} $*" >>"${calls}"\n${body}\n`,
+      );
+      fs.chmodSync(p, 0o755);
+    };
+    wrap("herdr", "");
+    wrap("hc", "");
+    wrap("herdr-app", "");
+    return { tmp: s.tmp, bin: s.bin, squad: s.squad, calls, prompts: s.prompts, hcPrompts: s.hcPrompts };
+  }
+
+  function lookupCalls(callsFile: string): string[] {
+    let raw = "";
+    try {
+      raw = fs.readFileSync(callsFile, "utf8");
+    } catch {
+      return [];
+    }
+    return raw
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "")
+      .filter((l) => !l.includes("agent prompt") && !l.includes("hc send"));
+  }
+
+  test("a send makes at most 8 lookup calls before delivery", () => {
+    const s = countingSetup();
+    const r = cli(s, ["send", "lead", "--kind", "request", "--seq", "1", "--body", "Hi."]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT lead");
+    const lookups = lookupCalls(s.calls);
+    // agent list + hc ls + herdr-app ls, each once: no per-site reruns, no sh command -v.
+    expect(lookups.length).toBeLessThanOrEqual(8);
+    expect(lookups.join("\n")).not.toContain("command -v");
+    expect(lookups.filter((l) => l.startsWith("herdr agent list")).length).toBeLessThanOrEqual(1);
+    expect(lookups.filter((l) => l.startsWith("hc ls")).length).toBeLessThanOrEqual(1);
+    expect(lookups.filter((l) => l.startsWith("herdr-app ls")).length).toBeLessThanOrEqual(1);
+  });
+
+  test("a hanging hc send times out as a failed notification, exit 2", async () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      s.tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+          { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+        ],
+      }),
+    );
+    fs.writeFileSync(
+      path.join(s.bin, "hc"),
+      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "get" ]; then printf '%s\\n' '{"foreground":{"name":"zsh"}}'; exit 0; fi\nif [ "$1" = "send" ]; then sleep 30; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
+    );
+    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
+    const started = Date.now();
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], {
+      HERDR_PANE_ID: "",
+      HC_TERMINAL_ID: "t9",
+    });
+    const elapsed = Date.now() - started;
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("stored in t2's inbox, but its notification failed");
+    expect(r.err).toContain("timed out");
+    expect(elapsed).toBeLessThan(25000);
+    const inbox = cli(s, ["chats"], { PEERS_SELF: "t2", HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(inbox.out).toContain("1 unread message");
+  }, 25000);
+
+  test("two concurrent sends do not fail with database is locked", async () => {
+    const s = setup();
+    const envFor = (self: string): Record<string, string> => ({
+      PATH: `${s.bin}:${process.env.PATH}`,
+      PEERS_CACHE: path.join(s.tmp, "cache"),
+      HOME: path.join(s.tmp, "home"),
+      HERDR_PANE_ID: "",
+      HC_TERMINAL_ID: "",
+      PEERS_SELF: self,
+      PEERS_CWD: s.squad,
+    });
+    const runSend = (self: string, target: string, seq: string): Promise<{ code: number | null; out: string; err: string }> => {
+      const proc = Bun.spawn(["bun", MAIN, "send", target, "--kind", "notice", "--seq", seq, "--body", `Hi ${seq}.`], {
+        env: { ...process.env, ...envFor(self) },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      return (async () => {
+        const [out, err, code] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]);
+        return { code, out: out.trim(), err: err.trim() };
+      })();
+    };
+    const [a, b] = await Promise.all([runSend("me", "ghost", "1"), runSend("me", "ghost", "2")]);
+    for (const r of [a, b]) {
+      expect(r.err).not.toContain("database is locked");
+      expect((r.out + r.err).toLowerCase()).not.toContain("database is locked");
+      expect(r.code).toBe(0);
+    }
+    const inbox = cli(s, ["chats"], { PEERS_SELF: "ghost", HERDR_PANE_ID: "" });
+    expect(inbox.out).toContain("2 unread messages in 1 chat");
+  });
+
+  test("a second open changes no data_version", () => {
+    const s = setup();
+    expect(cli(s, ["send", "lead", "--kind", "request", "--seq", "1", "--body", "Hi."]).code).toBe(0);
+    // First read establishes the profile; the second must write nothing.
+    expect(cli(s, ["chats"]).code).toBe(0);
+    const prevCache = process.env.PEERS_CACHE;
+    process.env.PEERS_CACHE = path.join(s.tmp, "cache");
+    let before = 0;
+    try {
+      const db = Store.open(s.squad);
+      try {
+        before = (db.db.query("PRAGMA data_version").get() as { data_version: number }).data_version;
+      } finally {
+        db.close();
+      }
+    } finally {
+      if (prevCache === undefined) delete process.env.PEERS_CACHE;
+      else process.env.PEERS_CACHE = prevCache;
+    }
+    expect(cli(s, ["chats"]).code).toBe(0);
+    expect(cli(s, ["open", "lead"]).code).toBe(0);
+    let after = -1;
+    try {
+      const db = Store.open(s.squad);
+      try {
+        after = (db.db.query("PRAGMA data_version").get() as { data_version: number }).data_version;
+      } finally {
+        db.close();
+      }
+    } finally {
+      if (prevCache === undefined) delete process.env.PEERS_CACHE;
+      else process.env.PEERS_CACHE = prevCache;
+    }
+    // Opening twice must not bump data_version by schema writes; the second
+    // chats/open pair writes no profile and marks nothing new as read.
+    expect(after).toBe(before);
+  });
+
+  test("chats counts metadata and open loads only the printed page", () => {
+    const s = setup();
+    const prevCache = process.env.PEERS_CACHE;
+    process.env.PEERS_CACHE = path.join(s.tmp, "cache");
+    const db = Store.open(s.squad);
+    try {
+      for (let i = 1; i <= 40; i++) {
+        db.insertMessage({
+          sender: "lead",
+          recipient: "me",
+          sender_name: "Lena",
+          sender_role: "lead",
+          kind: "notice",
+          seq: i,
+          reply_to: null,
+          body: `Seed message ${i} of 40.`,
+        });
+      }
+    } finally {
+      db.close();
+      if (prevCache === undefined) delete process.env.PEERS_CACHE;
+      else process.env.PEERS_CACHE = prevCache;
+    }
+    const chats = cli(s, ["chats"]);
+    expect(chats.code).toBe(0);
+    expect(chats.out).toContain("40 unread messages in 1 chat" .replace("40 unread", "40 unread"));
+    expect(chats.out).toContain("Seed message 40 of 40.");
+    const page2 = cli(s, ["open", "lead", "--page", "2"]);
+    expect(page2.code).toBe(0);
+    expect(page2.out).toContain("page 2 of 2");
+    expect(page2.out).toContain("Seed message 1 of 40.");
+    expect(page2.out).not.toContain("Seed message 40 of 40.");
+    // Metadata-only counting leaves the same unread total the notification uses.
+    const page1 = cli(s, ["open", "lead"]);
+    expect(page1.code).toBe(0);
+    expect(page1.out).toContain("Seed message 40 of 40.");
+  });
+});

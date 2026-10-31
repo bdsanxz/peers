@@ -19,13 +19,13 @@ export interface HerdrAgent {
   workspace: string;
 }
 
+/** Lookup timeout (5 s) and send timeout (10 s): a hung helper never blocks forever. */
+export const LOOKUP_TIMEOUT_MS = 5000;
+export const SEND_TIMEOUT_MS = 10000;
+
 export function haveHerdr(): boolean {
   try {
-    const p = spawnSync("sh", ["-c", "command -v herdr"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return p.status === 0 && (p.stdout as string).trim() !== "";
+    return Bun.which("herdr") !== null;
   } catch {
     return false;
   }
@@ -33,11 +33,7 @@ export function haveHerdr(): boolean {
 
 export function haveHc(): boolean {
   try {
-    const p = spawnSync("sh", ["-c", "command -v hc"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return p.status === 0 && (p.stdout as string).trim() !== "";
+    return Bun.which("hc") !== null;
   } catch {
     return false;
   }
@@ -45,7 +41,11 @@ export function haveHc(): boolean {
 
 function herdrJson(args: string[]): unknown {
   try {
-    const p = spawnSync("herdr", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const p = spawnSync("herdr", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: LOOKUP_TIMEOUT_MS,
+    });
     if (p.status !== 0) return null;
     return JSON.parse(p.stdout as string);
   } catch {
@@ -55,7 +55,11 @@ function herdrJson(args: string[]): unknown {
 
 function hcJson(args: string[]): unknown {
   try {
-    const p = spawnSync("hc", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const p = spawnSync("hc", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: LOOKUP_TIMEOUT_MS,
+    });
     if (p.status !== 0) return null;
     return JSON.parse(p.stdout as string);
   } catch {
@@ -100,10 +104,16 @@ export function hcAgentList(): HerdrAgent[] {
   return out;
 }
 
+/** Per-process memo of live agents: one `herdr agent list` plus one `hc ls`
+ * per command, never one per call site. A process runs one command, so no
+ * invalidation is needed. */
+let agentListCache: HerdrAgent[] | null = null;
+
 /** Every live agent on this machine, by its address: old herdr agents first,
  * then live herdr-core (hc) terminals. Either side may be empty when its
  * server is stopped; duplicates by address keep the herdr row. */
 export function agentList(): HerdrAgent[] {
+  if (agentListCache !== null) return agentListCache;
   const v = herdrJson(["agent", "list"]) as {
     result?: { agents?: Record<string, unknown>[] };
   } | null;
@@ -123,13 +133,17 @@ export function agentList(): HerdrAgent[] {
       workspace: typeof a["workspace_id"] === "string" ? (a["workspace_id"] as string) : "",
     });
   }
-  if (!haveHc()) return out;
+  if (!haveHc()) {
+    agentListCache = out;
+    return out;
+  }
   const seen = new Set(out.map((a) => a.address));
   for (const h of hcAgentList()) {
     if (seen.has(h.address)) continue;
     seen.add(h.address);
     out.push(h);
   }
+  agentListCache = out;
   return out;
 }
 
@@ -198,11 +212,26 @@ export function tabNameOf(terminal: string): string | null {
 }
 
 type HerdrTab = { name?: string; terminals?: { terminal?: string; app?: boolean }[] };
+
+/** Per-process memo of `herdr-app ls`: one call per command. No invalidation:
+ * a process runs one command and tabs are read-only mid-command. */
+let spacesCache: { tabs?: HerdrTab[] }[] | null = null;
+
 function herdrSpaces(): { tabs?: HerdrTab[] }[] {
+  if (spacesCache !== null) return spacesCache;
   try {
-    const p = spawnSync("herdr-app", ["ls"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    return p.status === 0 ? ((JSON.parse(p.stdout as string) as { spaces?: { tabs?: HerdrTab[] }[] }).spaces ?? []) : [];
-  } catch { return []; }
+    const p = spawnSync("herdr-app", ["ls"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: LOOKUP_TIMEOUT_MS,
+    });
+    spacesCache =
+      p.status === 0 ? ((JSON.parse(p.stdout as string) as { spaces?: { tabs?: HerdrTab[] }[] }).spaces ?? []) : [];
+    return spacesCache;
+  } catch {
+    spacesCache = [];
+    return spacesCache;
+  }
 }
 
 /** A Herdr tab name matched case-insensitively, with the terminal that serves it. */
@@ -261,9 +290,15 @@ function hcDelivery(json: unknown): DeliveryConfirmation {
   return "unconfirmed";
 }
 
+function timedOut(p: { error?: unknown }): boolean {
+  const e = p.error as { code?: unknown } | undefined;
+  return !!e && (e.code === "ETIMEDOUT" || String((e as Error).message ?? "").includes("ETIMEDOUT"));
+}
+
 function hcSend(target: string, text: string, env: NodeJS.ProcessEnv): { ok: boolean; detail: string } {
   try {
-    const p = spawnSync("hc", ["send", target, text], { encoding: "utf8", env });
+    const p = spawnSync("hc", ["send", target, text], { encoding: "utf8", env, timeout: SEND_TIMEOUT_MS });
+    if (timedOut(p)) return { ok: false, detail: `hc send to ${target} failed: timed out after ${SEND_TIMEOUT_MS / 1000} s` };
     if (p.status === 0) {
       let confirmation: DeliveryConfirmation = "unconfirmed";
       try {
@@ -299,13 +334,17 @@ function hcPrompt(target: string, text: string, from?: PromptFrom): { ok: boolea
     delete env.HC_TERMINAL_ID;
     const plain = hcSend(target, text, env);
     if (plain.ok) return plain;
+    // A hung helper will hang the retry too: report the timeout at once.
+    if (plain.detail.includes("timed out")) return plain;
   }
   return hcSend(target, text, process.env);
 }
 
 function herdrPrompt(target: string, text: string): { ok: boolean; detail: string } {
   try {
-    const p = spawnSync("herdr", ["agent", "prompt", target, text], { encoding: "utf8" });
+    const p = spawnSync("herdr", ["agent", "prompt", target, text], { encoding: "utf8", timeout: SEND_TIMEOUT_MS });
+    if (timedOut(p))
+      return { ok: false, detail: `herdr agent prompt to ${target} failed: timed out after ${SEND_TIMEOUT_MS / 1000} s` };
     if (p.status === 0) return { ok: true, detail: `notified via herdr agent prompt to ${target}` };
     const err = (p.stderr as string).trim();
     if (err === "") {

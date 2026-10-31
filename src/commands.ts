@@ -3,11 +3,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { UsageError, parseArgs, str, unknownFlags } from "./args.ts";
-import { aliases, loadCtx, memberKnown, memberOf, primary, type CanonCtx } from "./canonical.ts";
+import { aliases, clearPrimaryCache, loadCtx, memberKnown, memberOf, primary, type CanonCtx } from "./canonical.ts";
 import { agentList, checkTarget, effectiveKind, isShellKind, prompt, resolveTabAddress, tabNameOf, type HerdrAgent, type PromptFrom } from "./herdr.ts";
-import { ownContext, ownIdentity, register, selfAddress, squadRoot } from "./identity.ts";
+import { ownContext, ownIdentity, register, registerIfChanged, selfAddress, squadRoot } from "./identity.ts";
 import { isMemberWord, parenMember } from "./names.ts";
-import { PAGE_SIZE, Store, nowMs, type Msg, type Profile } from "./store.ts";
+import { PAGE_SIZE, Store, nowMs, type Msg, type MsgMeta, type Profile } from "./store.ts";
 
 /** Follow a stale member address to the live terminal that runs it now.
  * After a relaunch, sessions live under fresh terminal ids while chats keep
@@ -198,7 +198,8 @@ function bestProfile(cctx: CanonCtx, peerAliases: string[]): Profile | null {
 
 /** Every chat `ownerAliases` can see, newest first, with all spellings of
  * each peer merged. The inbox count and the notification count both come
- * from here, so they always agree. */
+ * from here, so they always agree. Only metadata is scanned for counting;
+ * bodies are loaded for the last message of each chat alone. */
 function mergedChats(store: Store, cctx: CanonCtx, ownerAliases: string[]): MergedChat[] {
   const ownLow = lowerSet(ownerAliases);
   const before = new Map<string, number>();
@@ -206,8 +207,8 @@ function mergedChats(store: Store, cctx: CanonCtx, ownerAliases: string[]): Merg
     const k = primary(c.peer, cctx).toLowerCase();
     before.set(k, Math.max(before.get(k) ?? 0, c.before_id));
   }
-  const groups = new Map<string, { display: string; msgs: Msg[] }>();
-  for (const m of store.messagesForOwners(ownerAliases)) {
+  const groups = new Map<string, { display: string; total: number; unread: number; lastId: number }>();
+  for (const m of store.messagesMetaForOwners(ownerAliases)) {
     const senderMine = ownLow.has(m.sender.toLowerCase());
     const recipMine = ownLow.has(m.recipient.toLowerCase());
     if (senderMine === recipMine) continue;
@@ -215,16 +216,26 @@ function mergedChats(store: Store, cctx: CanonCtx, ownerAliases: string[]): Merg
     const k = primary(other, cctx).toLowerCase();
     if (m.id <= (before.get(k) ?? 0)) continue;
     const g = groups.get(k);
-    if (g) g.msgs.push(m);
-    else groups.set(k, { display: primary(other, cctx), msgs: [m] });
+    if (g) {
+      g.total += 1;
+      if (ownLow.has(m.recipient.toLowerCase()) && m.read_at === null) g.unread += 1;
+      g.lastId = m.id;
+    } else {
+      groups.set(k, {
+        display: primary(other, cctx),
+        total: 1,
+        unread: ownLow.has(m.recipient.toLowerCase()) && m.read_at === null ? 1 : 0,
+        lastId: m.id,
+      });
+    }
   }
+  const lastById = new Map<number, Msg>();
+  for (const m of store.messagesByIds([...groups.values()].map((g) => g.lastId))) lastById.set(m.id, m);
   const out: MergedChat[] = [];
   for (const [, g] of groups) {
-    g.msgs.sort((a, b) => a.id - b.id);
-    const last = g.msgs[g.msgs.length - 1]!;
+    const last = lastById.get(g.lastId)!;
     const peerAliases = [...new Set([...aliases(g.display, cctx), ...aliases(last.sender, cctx), ...aliases(last.recipient, cctx)])];
-    const unread = g.msgs.filter((m) => ownLow.has(m.recipient.toLowerCase()) && m.read_at === null).length;
-    out.push({ peer: g.display, total: g.msgs.length, unread, last, profile: bestProfile(cctx, peerAliases) });
+    out.push({ peer: g.display, total: g.total, unread: g.unread, last, profile: bestProfile(cctx, peerAliases) });
   }
   out.sort((a, b) => b.last.id - a.last.id);
   return out;
@@ -235,10 +246,11 @@ function inboxUnread(store: Store, cctx: CanonCtx, ownerAliases: string[]): numb
   return mergedChats(store, cctx, ownerAliases).reduce((n, ch) => n + ch.unread, 0);
 }
 
-/** Visible messages of one chat: the owner's messages whose other side names
- * `peerKey`. The pairing is compared by canonical key in JS (not SQL `IN`),
- * so a sender stored as "Lena (lead)" still pairs with peer key "lead". */
-function visibleChat(store: Store, cctx: CanonCtx, ownerAliases: string[], peerKey: string): Msg[] {
+/** Visible message metadata of one chat: the owner's messages whose other
+ * side names `peerKey`. Compared by canonical key in JS (not SQL `IN`), so
+ * a sender stored as "Lena (lead)" still pairs with peer key "lead".
+ * Metadata only: bodies are loaded for the page `open` prints. */
+function visibleMeta(store: Store, cctx: CanonCtx, ownerAliases: string[], peerKey: string): MsgMeta[] {
   const ownLow = lowerSet(ownerAliases);
   const pk = peerKey.toLowerCase();
   const before = new Map<string, number>();
@@ -246,8 +258,8 @@ function visibleChat(store: Store, cctx: CanonCtx, ownerAliases: string[], peerK
     const k = primary(c.peer, cctx).toLowerCase();
     before.set(k, Math.max(before.get(k) ?? 0, c.before_id));
   }
-  const out: Msg[] = [];
-  for (const m of store.messagesForOwners(ownerAliases)) {
+  const out: MsgMeta[] = [];
+  for (const m of store.messagesMetaForOwners(ownerAliases)) {
     const senderMine = ownLow.has(m.sender.toLowerCase());
     const recipMine = ownLow.has(m.recipient.toLowerCase());
     if (senderMine === recipMine) continue;
@@ -257,6 +269,18 @@ function visibleChat(store: Store, cctx: CanonCtx, ownerAliases: string[], peerK
     out.push(m);
   }
   return out;
+}
+
+/** Visible message ids of one chat, oldest first. */
+function visibleIds(store: Store, cctx: CanonCtx, ownerAliases: string[], peerKey: string): number[] {
+  return visibleMeta(store, cctx, ownerAliases, peerKey).map((m) => m.id);
+}
+
+/** Visible messages of one chat: the owner's messages whose other side names
+ * `peerKey`. The pairing is compared by canonical key in JS (not SQL `IN`),
+ * so a sender stored as "Lena (lead)" still pairs with peer key "lead". */
+function visibleChat(store: Store, cctx: CanonCtx, ownerAliases: string[], peerKey: string): Msg[] {
+  return store.messagesByIds(visibleIds(store, cctx, ownerAliases, peerKey));
 }
 
 const KINDS = ["request", "ack", "progress", "completion", "receipt", "notice"];
@@ -523,6 +547,7 @@ Examples:
 };
 
 export async function dispatch(cmd: string, argv: string[]): Promise<number> {
+  clearPrimaryCache();
   switch (cmd) {
     case "whoami":
       return cmdWhoami(argv);
@@ -577,7 +602,7 @@ function resolveSquadRoot(squad: string | undefined, dir: string): string {
   return root;
 }
 
-function openCtx(squad: string | undefined, record: boolean): Ctx {
+function openCtx(squad: string | undefined, record: boolean | "if-changed"): Ctx {
   const { me, dir, kind } = ownContext();
   let root: string;
   let explicit: boolean;
@@ -589,7 +614,8 @@ function openCtx(squad: string | undefined, record: boolean): Ctx {
     explicit = false;
   }
   const store = Store.open(root);
-  if (record) register(store, me, dir, kind);
+  if (record === true) register(store, me, dir, kind);
+  else if (record === "if-changed") registerIfChanged(store, me, dir, kind);
   return { me, kind, dir, store, explicit };
 }
 
@@ -845,64 +871,66 @@ async function cmdSend(argv: string[]): Promise<number> {
     ]);
     const stated = statedRole !== null;
     const role = statedRole ?? "unassigned";
-    c.store.upsertProfile(
-      {
-        address: senderKey,
-        runtime: c.kind,
-        name: statedName,
-        role: stated ? statedRole : null,
-        cwd: c.dir,
-        updated_at: nowMs(),
-      },
-      stated,
-    );
-
-    // A tab name is only the address: the notification and the live check
-    // use the tab's terminal (a member word matches its "(member)" tab),
-    // else any live spelling of the canonical peer, never the name in the
-    // terminal's place.
-    cctx = canonCtx(c.store, agents);
-    const peerAliases = peerView(tab.canonical ?? target, cctx).aliases;
-    const peerLow = lowerSet(peerAliases);
-    let sendTo = tab.terminal ?? null;
-    // Every other spelling of the peer that is live, scoped to the sender's
-    // squad: another squad's terminal never gets this squad's notification,
-    // even when its tab, role or directory names the same member. The
-    // member's own session is its member dir; several leftovers stay queued.
+    // One transaction for the send's writes: concurrent senders queue on the
+    // write lock instead of interleaving separate autocommits.
+    let sendTo: string | null = tab.terminal ?? null;
     let squadHits: string[] = [];
-    if (!sendTo) {
-      const inScope = agents.filter(
-        (a) =>
-          (peerLow.has(a.address.toLowerCase()) || peerLow.has(a.pane.toLowerCase())) &&
-          !isOtherSquadTerminal(a, c.store.root),
+    let liveAgent: HerdrAgent | null = null;
+    let peerLow: Set<string> = new Set();
+    c.store.transaction(() => {
+      c.store.upsertProfile(
+        {
+          address: senderKey,
+          runtime: c.kind,
+          name: statedName,
+          role: stated ? statedRole : null,
+          cwd: c.dir,
+          updated_at: nowMs(),
+        },
+        stated,
       );
-      const preferred = inScope.filter((a) => isMemberDir(a, c.store.root, peerKey));
-      const ranked = preferred.length > 0 ? preferred : inScope;
-      if (ranked.length === 1) sendTo = ranked[0]!.address;
-      else if (ranked.length > 1) squadHits = [...new Set(ranked.map((a) => a.address))];
-    }
-    const liveAgent = sendTo ? (agents.find((a) => a.address === sendTo || a.pane === sendTo) ?? null) : null;
-    const known = c.store.profile(peerKey);
-    c.store.upsertProfile(
-      {
-        address: peerKey,
-        runtime: known?.runtime ?? liveAgent?.kind ?? "herdr",
-        name: null,
-        role: null,
-        cwd: known?.cwd ?? liveAgent?.cwd ?? null,
-        updated_at: nowMs(),
-      },
-      false,
-    );
-    c.store.insertMessage({
-      sender: senderKey,
-      recipient: peerKey,
-      sender_name: statedName,
-      sender_role: role,
-      kind,
-      seq,
-      reply_to: replyTo,
-      body: body.trim(),
+
+      // A tab name is only the address: the notification and the live check
+      // use the tab's terminal (a member word matches its "(member)" tab),
+      // else any live spelling of the canonical peer, never the name in the
+      // terminal's place.
+      cctx = canonCtx(c.store, agents);
+      const peerAliases = peerView(tab.canonical ?? target, cctx).aliases;
+      peerLow = lowerSet(peerAliases);
+      if (!sendTo) {
+        const inScope = agents.filter(
+          (a) =>
+            (peerLow.has(a.address.toLowerCase()) || peerLow.has(a.pane.toLowerCase())) &&
+            !isOtherSquadTerminal(a, c.store.root),
+        );
+        const preferred = inScope.filter((a) => isMemberDir(a, c.store.root, peerKey));
+        const ranked = preferred.length > 0 ? preferred : inScope;
+        if (ranked.length === 1) sendTo = ranked[0]!.address;
+        else if (ranked.length > 1) squadHits = [...new Set(ranked.map((a) => a.address))];
+      }
+      liveAgent = sendTo ? (agents.find((a) => a.address === sendTo || a.pane === sendTo) ?? null) : null;
+      const known = c.store.profile(peerKey);
+      c.store.upsertProfile(
+        {
+          address: peerKey,
+          runtime: known?.runtime ?? liveAgent?.kind ?? "herdr",
+          name: null,
+          role: null,
+          cwd: known?.cwd ?? liveAgent?.cwd ?? null,
+          updated_at: nowMs(),
+        },
+        false,
+      );
+      c.store.insertMessage({
+        sender: senderKey,
+        recipient: peerKey,
+        sender_name: statedName,
+        sender_role: role,
+        kind,
+        seq,
+        reply_to: replyTo,
+        body: body.trim(),
+      });
     });
     // The unread count comes from the same merged chats the peer will see.
     cctx = canonCtx(c.store, agents);
@@ -1020,7 +1048,7 @@ function cmdContacts(argv: string[]): number {
   const p = parseArgs(argv, []);
   unknownFlags(p, ["squad"]);
   if (p.positionals.length !== 0) throw new UsageError("contacts takes no arguments");
-  const c = openCtx(str(p, "squad"), true);
+  const c = openCtx(str(p, "squad"), "if-changed");
   try {
     const agents = agentList();
     const cctx = canonCtx(c.store, agents);
@@ -1082,7 +1110,7 @@ function cmdChats(argv: string[]): number {
   const p = parseArgs(argv, []);
   unknownFlags(p, ["squad"]);
   if (p.positionals.length !== 0) throw new UsageError("chats takes no arguments");
-  const c = openCtx(str(p, "squad"), true);
+  const c = openCtx(str(p, "squad"), "if-changed");
   try {
     const agents = agentList();
     const cctx = canonCtx(c.store, agents);
@@ -1157,7 +1185,7 @@ function cmdOpen(argv: string[]): number {
   const pageRaw = str(p, "page") ?? "1";
   const page = Number(pageRaw);
   if (!Number.isInteger(page) || page < 1) throw new UsageError(`bad --page ${JSON.stringify(pageRaw)}: expected an integer >= 1`);
-  const c = openCtx(str(p, "squad"), true);
+  const c = openCtx(str(p, "squad"), "if-changed");
   try {
     const agents = agentList();
     const cctx = canonCtx(c.store, agents);
@@ -1168,8 +1196,8 @@ function cmdOpen(argv: string[]): number {
     if (!tab.canonical && !isKnownPeer(tab.canonical ?? target, cctx, c.store)) {
       throw new UsageError(`no member, terminal or tab named ${JSON.stringify(target)}`);
     }
-    const visible = visibleChat(c.store, cctx, me.aliases, peer.key);
-    const total = visible.length;
+    const metas = visibleMeta(c.store, cctx, me.aliases, peer.key);
+    const total = metas.length;
     if (total === 0) {
       console.log(`No chat with ${peer.key} in your inbox in ${c.store.root}.`);
       return 0;
@@ -1181,7 +1209,8 @@ function cmdOpen(argv: string[]): number {
       );
     }
     const start = Math.max(0, total - page * PAGE_SIZE);
-    const msgs = visible.slice(start, start + PAGE_SIZE);
+    // Only the printed page loads bodies; counting uses metadata alone.
+    const msgs = c.store.messagesByIds(metas.slice(start, start + PAGE_SIZE).map((m) => m.id));
     const { name, role } = label(bestProfile(cctx, peer.aliases));
     const partner: Partner = { name, role };
     const last = total - (page - 1) * PAGE_SIZE;
@@ -1212,7 +1241,10 @@ function cmdOpen(argv: string[]): number {
     );
     const flag = squadFlagOf(c.store.root, c.explicit);
     if (page < pages) {
-      const older = visible.filter((m) => m.id < msgs[0]!.id && toMe(m) && m.read_at === null).length;
+      const firstId = msgs[0]!.id;
+      const older = metas.filter(
+        (m) => m.id < firstId && ownLow.has(m.recipient.toLowerCase()) && m.read_at === null,
+      ).length;
       const note = older > 0 ? `  (${plural(older, "unread message", "unread messages")} on older pages)` : "";
       console.log(`OLDER: peers open ${shellWord(peer.key)}${flag} --page ${page + 1}${note}`);
     }
