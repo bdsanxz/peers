@@ -1,5 +1,6 @@
 import { UsageError } from "./args.ts";
 import { HELP, dispatch } from "./commands.ts";
+import { argvWantsJson, hintFor, jsonError, kindFor } from "./json.ts";
 import pkg from "../package.json" with { type: "json" };
 
 let args = process.argv.slice(2);
@@ -24,6 +25,9 @@ if (!cmd || cmd === "--help" || cmd === "-h" || cmd === "help") {
   process.exit(cmd ? 0 : 2);
 }
 const label = cmd;
+// With --json, errors print one JSON document on stdout and keep today's
+// exit codes; the human stderr line stays only when --json is absent.
+const wantsJson = argvWantsJson(process.argv.slice(2));
 try {
   // --help or -h anywhere before `--` prints the command's help and runs
   // nothing: asking for help never deletes a chat, consumes unread, or sends.
@@ -39,10 +43,22 @@ try {
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
   if (e instanceof UsageError || msg.startsWith("the message is stored ")) {
-    console.error(`peers ${label}: ${msg}\nRun \`peers ${label} --help\` for usage.`);
-    process.exitCode = 2;
+    if (wantsJson) {
+      const kind = kindFor(msg, e instanceof UsageError);
+      const hint = hintFor(`Run \`peers ${label} --help\` for usage.`) ?? `run peers ${label} --help for usage`;
+      console.log(JSON.stringify(jsonError(kind, msg, e instanceof UsageError ? hint : "do not resend; the message is stored")));
+      process.exitCode = 2;
+    } else {
+      console.error(`peers ${label}: ${msg}\nRun \`peers ${label} --help\` for usage.`);
+      process.exitCode = 2;
+    }
   } else {
-    console.error(`peers ${label}: ${msg}`);
-    process.exitCode = 1;
+    if (wantsJson) {
+      console.log(JSON.stringify(jsonError(kindFor(msg, false), msg, hintFor(msg))));
+      process.exitCode = 1;
+    } else {
+      console.error(`peers ${label}: ${msg}`);
+      process.exitCode = 1;
+    }
   }
 }

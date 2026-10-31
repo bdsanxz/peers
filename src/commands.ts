@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { UsageError, parseArgs, str, unknownFlags } from "./args.ts";
+import { iso, jsonError, printJson, wantsJson } from "./json.ts";
 import { aliases, clearPrimaryCache, loadCtx, memberKnown, memberOf, primary, type CanonCtx } from "./canonical.ts";
 import { agentList, checkTarget, isShellKind, prompt, resolveTabAddress, tabNameOf, type HerdrAgent } from "./herdr.ts";
 import { ownContext, ownIdentity, register, registerIfChanged, selfAddress, squadRoot } from "./identity.ts";
@@ -345,6 +346,10 @@ Exit codes:
   1  other errors
   2  usage error, or the message is stored but its notification failed; the error line says why
 
+Machine output:
+  Every command takes --json for one JSON document on stdout, no prose.
+  Errors with --json print {"error":{"kind","message","hint"}} on stdout.
+
 Examples:
   peers whoami
   peers send lead --kind request --seq 1 --body "Review api/."
@@ -352,7 +357,7 @@ Examples:
   peers open lead`,
   whoami: `peers whoami — print this session's canonical address
 
-Usage: peers whoami [--squad <dir>]
+Usage: peers whoami [--squad <dir>] [--json]
 
 Output:
   lead                  this session's address, one line: the canonical,
@@ -369,11 +374,14 @@ Notes:
   - --squad <dir> prints the address in that squad's database.
   - Exit 1 outside a live agent session with no PEERS_SELF.
 
+JSON (--json):
+  {"address": "lead", "squad_root": "/squad/dir"}
+
 Examples:
   peers whoami`,
   list: `peers list — list live agents
 
-Usage: peers list [--squad <dir>]
+Usage: peers list [--squad <dir>] [--json]
 
 Output:
   lead  kind=muse  status=idle  cwd=<dir>  workspace=<id>
@@ -386,11 +394,14 @@ Notes:
   - A plain shell (or an unknown kind) lists as kind=shell and is never notified.
   - --squad <dir> hides your session under that squad's roster.
 
+JSON (--json):
+  {"agents": [{"address": "lead", "pane": "w1:p1", "kind": "muse", "status": "idle", "cwd": "/dir", "workspace": "w1"}]}
+
 Examples:
   peers list`,
   send: `peers send — store one message in the chat with a peer, then notify the peer
 
-Usage: peers send <TARGET> --kind <KIND> --seq <N> (--body <TEXT> | <body on stdin>) [OPTIONS]
+Usage: peers send <TARGET> --kind <KIND> --seq <N> (--body <TEXT> | <body on stdin>) [OPTIONS] [--json]
 
 Output:
   SENT <target>: stored in its inbox (1 unread message); notified via herdr agent prompt to <target> (...)
@@ -442,13 +453,18 @@ Notes:
   - "stored ... but its notification failed": do not send it again; the message is in the chat.
   - "queued, not delivered yet": the target is not live; nothing ran.
 
+JSON (--json):
+  {"peer": "lead", "target": "lead", "stored": true, "message_id": 1, "unread": 1, "squad_root": "/squad/dir",
+   "unknown_target": false, "did_you_mean": [], "notify": {"outcome": "notified|queued|failed", "reason": "not_live|plain_shell|not_found|ambiguous|failed",
+   "route": "herdr|hcx|none", "detail": "..."}, "replaced_by": null, "reply_to": null, "expects_reply": true}
+
 Examples:
   peers send lead --kind request --seq 1 --body "Summarize README.md."
   peers send api --kind completion --seq 1 < result.md
   peers send worker --kind request --seq 2 --reply-to lead --body "..."`,
   contacts: `peers contacts — list every peer profile in the squad's database
 
-Usage: peers contacts
+Usage: peers contacts [--squad <dir>] [--json]
 
 Output:
   lead  status=live  name="Lena"  role=lead  kind=muse  cwd=<dir>  seen=<time>
@@ -468,12 +484,16 @@ Notes:
   - Every spelling of one peer lists once, under its canonical key.
   - The roles "unassigned" and "user" are shared, so they never replace each other.
 
+JSON (--json):
+  {"squad_root": "/squad/dir", "contacts": [{"address": "lead", "status": "live|offline|replaced",
+   "replaced_by": null, "name": "Lena", "role": "lead", "kind": "muse", "cwd": "/dir", "seen": "2026-10-26T10:00:00.000Z"}]}
+
 Examples:
   peers contacts
   peers contacts --squad ~/squads/shop`,
   chats: `peers chats — list your chats, newest first, with their unread counts
 
-Usage: peers chats
+Usage: peers chats [--squad <dir>] [--json]
   (also: peers inbox)
 
 Output:
@@ -491,12 +511,17 @@ Markers:
 Notes:
   - Run it once when you start or resume; never loop on it to wait for a reply.
 
+JSON (--json):
+  {"me": "me", "squad_root": "/squad/dir", "unread": 2, "chat_count": 1, "open_next": "peers open lead",
+   "chats": [{"peer": "lead", "name": "Lena", "role": "lead", "unread": 2, "messages": 9,
+   "last": {"id": 1, "sender": "lead", "kind": "ack", "seq": 3, "sent_at": "2026-10-26T10:00:00.000Z", "body": "..."}}]}
+
 Examples:
   peers chats
   peers inbox --squad ~/squads/shop`,
   open: `peers open — print one page of a chat, like a messenger: you and the peer
 
-Usage: peers open <TARGET> [--page N]
+Usage: peers open <TARGET> [--page N] [--squad <dir>] [--json]
 
 Output:
   CHAT with Lena (lead) · lead           the peer: name (role) · address
@@ -528,12 +553,16 @@ Notes:
     terminal or pane id. Every spelling opens the same merged chat.
   - Exit 2 when the page does not exist.
 
+JSON (--json):
+  {"peer": "lead", "page": 1, "pages": 2, "total": 40, "inbox_unread": 0,
+   "messages": [{"id": 21, "sender": "lead", "kind": "ack", "seq": 3, "sent_at": "2026-10-26T10:00:00.000Z", "body": "..."}]}
+
 Examples:
   peers open lead
   peers open w1:p2 --page 2`,
   delete: `peers delete — hide a chat from your own view; the peer keeps its copy
 
-Usage: peers delete <TARGET>
+Usage: peers delete <TARGET> [--squad <dir>] [--json]
 
 Output:
   DELETED your view of the chat with <peer>: 3 messages hidden from you; <peer> still sees the whole chat.
@@ -544,6 +573,9 @@ Notes:
   - <TARGET> is any spelling of the peer, quoted when it holds spaces.
   - A new message in either direction restarts the chat, showing only what came after.
   - Delete only when the user asks, or when the exchange is closed and its history is not needed.
+
+JSON (--json):
+  {"peer": "lead", "squad_root": "/squad/dir", "hidden": 3, "had_chat": true}
 
 Examples:
   peers delete lead`,
@@ -654,6 +686,7 @@ function cmdWhoami(argv: string[]): number {
   const p = parseArgs(argv, []);
   unknownFlags(p, ["squad"]);
   if (p.positionals.length !== 0) throw new UsageError("whoami takes no arguments");
+  const json = wantsJson(p);
   const me = selfAddress();
   const squad = str(p, "squad");
   // ownContext cannot fail once selfAddress stands: ownAgent only returns null.
@@ -662,17 +695,20 @@ function cmdWhoami(argv: string[]): number {
   const root = resolveSquadRoot(squad, dir);
   // The canonical key, never a tab with spaces: the output feeds straight
   // back into any peers command. --squad reads that squad's roster for it.
+  let out = me;
   try {
     const store = Store.open(root);
     try {
       const cctx = loadCtx(store.root, agentList(), store.contacts(""));
-      console.log(primary(me, cctx));
+      out = primary(me, cctx);
     } finally {
       store.close();
     }
   } catch {
-    console.log(me);
+    out = me;
   }
+  if (json) printJson({ address: out, squad_root: root });
+  else console.log(out);
   // Recording the profile is a courtesy; whoami answers even when the database cannot be written.
   try {
     const store = Store.open(root);
@@ -691,6 +727,7 @@ function cmdList(argv: string[]): number {
   const p = parseArgs(argv, []);
   unknownFlags(p, ["squad"]);
   if (p.positionals.length !== 0) throw new UsageError("list takes no arguments");
+  const json = wantsJson(p);
   let me: string | null = null;
   let dir = process.cwd();
   try {
@@ -714,12 +751,15 @@ function cmdList(argv: string[]): number {
       // alias expansion is best-effort; the raw address still hides itself
     }
   }
+  const rows: { address: string; pane: string; kind: string; status: string; cwd: string; workspace: string }[] = [];
   for (const a of agents) {
     if (mine.has(a.address.toLowerCase()) || mine.has(a.pane.toLowerCase())) continue;
     // A plain shell (or an unknown kind) is labelled as a shell: notifications never go there.
     const kind = isShellKind(a.kind) ? "shell" : a.kind;
-    console.log(`${a.address}  kind=${kind}  status=${a.state}  cwd=${a.cwd}  workspace=${a.workspace}`);
+    rows.push({ address: a.address, pane: a.pane, kind, status: a.state, cwd: a.cwd, workspace: a.workspace });
   }
+  if (json) printJson({ agents: rows });
+  else for (const r of rows) console.log(`${r.address}  kind=${r.kind}  status=${r.status}  cwd=${r.cwd}  workspace=${r.workspace}`);
   return 0;
 }
 
@@ -807,6 +847,7 @@ function liveness(store: Store, meAliases: Set<string>, agents: HerdrAgent[], cc
 async function cmdSend(argv: string[]): Promise<number> {
   const p = parseArgs(argv, []);
   unknownFlags(p, ["kind", "seq", "body", "reply-to", "role", "name", "squad"]);
+  const json = wantsJson(p);
   const target = p.positionals[0];
   if (!target || p.positionals.length !== 1) {
     throw new UsageError(
@@ -880,6 +921,7 @@ async function cmdSend(argv: string[]): Promise<number> {
     let squadHits: string[] = [];
     let liveAgent: HerdrAgent | null = null;
     let peerLow: Set<string> = new Set();
+    let messageId = 0;
     c.store.transaction(() => {
       c.store.upsertProfile(
         {
@@ -924,7 +966,7 @@ async function cmdSend(argv: string[]): Promise<number> {
         },
         false,
       );
-      c.store.insertMessage({
+      messageId = c.store.insertMessage({
         sender: senderKey,
         recipient: peerKey,
         sender_name: statedName,
@@ -961,6 +1003,113 @@ async function cmdSend(argv: string[]): Promise<number> {
     // Prose names the target as typed (or its tab): the stored key and every
     // printed command use the canonical peer key instead.
     const displayTarget = tab.canonical ?? target;
+    if (json) {
+      const routeOf = (detail: string): string => {
+        if (detail.includes("hcx send")) return "hcx";
+        if (detail.includes("herdr agent prompt")) return "herdr";
+        return "none";
+      };
+      const matches = !targetKnown ? closeMatches(target, cctx, c.store) : [];
+      let notify: Record<string, unknown>;
+      let failedDetail: string | null = null;
+      if (squadHits.length > 0) {
+        notify = {
+          outcome: "queued",
+          reason: "ambiguous",
+          detail: `queued, not delivered yet: ${displayTarget} matches several live terminals in this squad: ${squadHits.join(", ")}`,
+          route: "none",
+          candidates: squadHits,
+        };
+      } else if (!live) {
+        const follow = followLiveTarget(c.store.root, peerKey, agents, profiles);
+        if (follow.address !== "") {
+          const done = prompt(follow.address, text);
+          if (done.ok) {
+            notify = {
+              outcome: "notified",
+              detail: done.detail,
+              route: routeOf(done.detail),
+              via: follow.address,
+            };
+          } else if (!done.ok && "queued" in done && done.queued) {
+            notify = {
+              outcome: "queued",
+              reason: done.reason === "plain-shell" ? "plain_shell" : "not_found",
+              detail: done.detail,
+              route: routeOf(done.detail),
+              via: follow.address,
+            };
+          } else {
+            notify = {
+              outcome: "queued",
+              reason: "failed",
+              detail: done.detail,
+              route: routeOf(done.detail),
+              via: follow.address,
+            };
+          }
+        } else {
+          notify = {
+            outcome: "queued",
+            reason: "not_live",
+            detail: `queued, not delivered yet: ${displayTarget} is not a live agent`,
+            route: "none",
+            candidates: follow.candidates,
+          };
+        }
+      } else {
+        const done = prompt(sendTo!, text);
+        if (done.ok) {
+          notify = { outcome: "notified", detail: done.detail, route: routeOf(done.detail) };
+        } else if (!done.ok && "queued" in done && done.queued) {
+          notify = {
+            outcome: "queued",
+            reason: done.reason === "plain-shell" ? "plain_shell" : "not_found",
+            detail: done.detail,
+            route: routeOf(done.detail),
+          };
+        } else {
+          failedDetail = done.detail;
+          notify = { outcome: "failed", detail: done.detail, route: routeOf(done.detail) };
+        }
+      }
+      const liveMap = liveness(c.store, meAliases, agents, cctx);
+      const flags = profiles.map((pr) => liveMap.get(pr.address) ?? false);
+      const st = statuses(profiles, flags);
+      const ri = profiles.findIndex((pr) => peerLow.has(pr.address.toLowerCase()));
+      const replacedBy = ri >= 0 && typeof st[ri] !== "string" ? (st[ri] as { replaced: string }).replaced : null;
+      const replacedRole = ri >= 0 && replacedBy !== null ? (profiles[ri]!.role ?? null) : null;
+      if (failedDetail !== null) {
+        const kind = /timed out after/.test(failedDetail) ? "timeout" : "failed";
+        printJson({
+          error: jsonError(kind, `the message is stored in ${peerKey}'s inbox, but its notification failed: ${failedDetail}`, "do not resend; the message is stored").error,
+          peer: peerKey,
+          target: displayTarget,
+          stored: true,
+          message_id: messageId,
+          unread,
+          squad_root: c.store.root,
+          notify,
+        });
+        return 2;
+      }
+      printJson({
+        peer: peerKey,
+        target: displayTarget,
+        stored: true,
+        message_id: messageId,
+        unread,
+        squad_root: c.store.root,
+        unknown_target: !targetKnown,
+        did_you_mean: matches,
+        notify,
+        replaced_by: replacedBy,
+        replaced_role: replacedRole,
+        reply_to: replyTo,
+        expects_reply: replyTo !== null || ["request", "notice", "completion"].includes(kind),
+      });
+      return 0;
+    }
     // A mistyped target still stores the message, but the sender is told the
     // address names nothing known, with close matches.
     if (!targetKnown) {
@@ -1054,6 +1203,7 @@ function cmdContacts(argv: string[]): number {
   const p = parseArgs(argv, []);
   unknownFlags(p, ["squad"]);
   if (p.positionals.length !== 0) throw new UsageError("contacts takes no arguments");
+  const json = wantsJson(p);
   const c = openCtx(str(p, "squad"), "if-changed");
   try {
     const agents = agentList();
@@ -1070,9 +1220,12 @@ function cmdContacts(argv: string[]): number {
       else groups.set(key, [pr]);
     }
     if (groups.size === 0) {
-      console.log(
-        `No contacts yet in ${c.store.root}: a peer appears here once it runs any peers command in this squad, or once you message it.`,
-      );
+      if (json) printJson({ squad_root: c.store.root, contacts: [] });
+      else {
+        console.log(
+          `No contacts yet in ${c.store.root}: a peer appears here once it runs any peers command in this squad, or once you message it.`,
+        );
+      }
       return 0;
     }
     const liveSet = new Set<string>();
@@ -1099,6 +1252,26 @@ function cmdContacts(argv: string[]): number {
     const rows = reps
       .map((pr, i) => ({ pr, s: st[i]! }))
       .sort((a, b) => rank(a.s) - rank(b.s) || b.pr.updated_at - a.pr.updated_at);
+    if (json) {
+      printJson({
+        squad_root: c.store.root,
+        contacts: rows.map(({ pr, s }) => {
+          const { name, role } = label(pr);
+          return {
+            address: pr.address,
+            status: statusWord(s),
+            replaced_by: typeof s !== "string" ? s.replaced : null,
+            name,
+            role,
+            kind: pr.runtime,
+            cwd: pr.cwd,
+            seen: iso(pr.updated_at),
+            seen_ms: pr.updated_at,
+          };
+        }),
+      });
+      return 0;
+    }
     for (const { pr, s } of rows) {
       const { name, role } = label(pr);
       const by = typeof s !== "string" ? `  by=${s.replaced}` : "";
@@ -1116,6 +1289,7 @@ function cmdChats(argv: string[]): number {
   const p = parseArgs(argv, []);
   unknownFlags(p, ["squad"]);
   if (p.positionals.length !== 0) throw new UsageError("chats takes no arguments");
+  const json = wantsJson(p);
   const c = openCtx(str(p, "squad"), "if-changed");
   try {
     const agents = agentList();
@@ -1124,6 +1298,43 @@ function cmdChats(argv: string[]): number {
     const chats = mergedChats(c.store, cctx, me.aliases);
     const unread = chats.reduce((n, ch) => n + ch.unread, 0);
     const ownLow = lowerSet(me.aliases);
+    if (json) {
+      const first = chats.find((ch) => ch.unread > 0) ?? chats[0];
+      printJson({
+        me: me.key,
+        squad_root: c.store.root,
+        unread,
+        chat_count: chats.length,
+        chats: chats.map((ch) => {
+          const { name, role } = label(ch.profile);
+          const last = ch.last;
+          const from = ownLow.has(last.sender.toLowerCase()) ? "you" : "them";
+          return {
+            peer: ch.peer,
+            name,
+            role,
+            unread: ch.unread,
+            messages: ch.total,
+            last: {
+              id: last.id,
+              sender: last.sender,
+              kind: last.kind,
+              seq: last.seq,
+              reply_to: last.reply_to,
+              sent_at: iso(last.sent_at),
+              sent_ms: last.sent_at,
+              read_at: iso(last.read_at),
+              read_ms: last.read_at,
+              from,
+              body: last.body,
+              body_preview: oneLine(last.body).slice(0, 80),
+            },
+          };
+        }),
+        open_next: first ? `peers open ${shellWord(first.peer)}${squadFlagOf(c.store.root, c.explicit)}` : null,
+      });
+      return 0;
+    }
     console.log(`INBOX ${me.key} in ${c.store.root}: ${plural(unread, "unread message", "unread messages")} in ${plural(chats.length, "chat", "chats")}`);
     for (const ch of chats) {
       const { name, role } = label(ch.profile);
@@ -1183,6 +1394,7 @@ function render(m: Msg, mine: boolean, partner: Partner): void {
 function cmdOpen(argv: string[]): number {
   const p = parseArgs(argv, []);
   unknownFlags(p, ["page", "squad"]);
+  const json = wantsJson(p);
   const target = p.positionals[0];
   if (!target || p.positionals.length !== 1) throw new UsageError("open needs exactly one <TARGET>");
   checkAddressTarget(target);
@@ -1205,7 +1417,19 @@ function cmdOpen(argv: string[]): number {
     const metas = visibleMeta(c.store, cctx, me.aliases, peer.key);
     const total = metas.length;
     if (total === 0) {
-      console.log(`No chat with ${peer.key} in your inbox in ${c.store.root}.`);
+      if (json) {
+        printJson({
+          peer: peer.key,
+          squad_root: c.store.root,
+          page,
+          pages: 0,
+          total: 0,
+          messages: [],
+          unread_in_page: 0,
+          unread_total: 0,
+          inbox_unread: inboxUnread(c.store, cctx, me.aliases),
+        });
+      } else console.log(`No chat with ${peer.key} in your inbox in ${c.store.root}.`);
       return 0;
     }
     const pages = Math.ceil(total / PAGE_SIZE);
@@ -1221,12 +1445,52 @@ function cmdOpen(argv: string[]): number {
     const partner: Partner = { name, role };
     const last = total - (page - 1) * PAGE_SIZE;
     const first = last - msgs.length + 1;
-    if (name === "") console.log(`CHAT with ${peer.key} (${role})`);
-    else console.log(`CHAT with ${withRole(name, role)} · ${peer.key}`);
-    console.log(`page ${page} of ${pages}  (messages ${first}-${last} of ${total}, oldest first; page 1 holds the newest)\n`);
     const mine = (m: Msg): boolean => ownLow.has(m.sender.toLowerCase());
     const toMe = (m: Msg): boolean => ownLow.has(m.recipient.toLowerCase());
     const unread = msgs.filter((m) => toMe(m) && m.read_at === null).length;
+    if (json) {
+      const unreadIds = msgs.filter((m) => toMe(m) && m.read_at === null).map((m) => m.id);
+      c.store.markRead(me.aliases, unreadIds);
+      printJson({
+        peer: peer.key,
+        name,
+        role,
+        squad_root: c.store.root,
+        page,
+        pages,
+        total,
+        first,
+        last,
+        messages: msgs.map((m) => ({
+          id: m.id,
+          sender: m.sender,
+          recipient: m.recipient,
+          sender_name: m.sender_name,
+          sender_role: m.sender_role,
+          kind: m.kind,
+          seq: m.seq,
+          reply_to: m.reply_to,
+          body: m.body,
+          sent_at: iso(m.sent_at),
+          sent_ms: m.sent_at,
+          read_at: iso(m.read_at),
+          read_ms: m.read_at,
+          mine: mine(m),
+          to_me: toMe(m),
+          is_new: toMe(m) && m.read_at === null,
+        })),
+        unread_in_page: unread,
+        unread_total: metas.filter((m) => ownLow.has(m.recipient.toLowerCase()) && m.read_at === null).length,
+        marked_read: unreadIds,
+        older_page: page < pages ? page + 1 : null,
+        newer_page: page > 1 ? page - 1 : null,
+        inbox_unread: inboxUnread(c.store, cctx, me.aliases),
+      });
+      return 0;
+    }
+    if (name === "") console.log(`CHAT with ${peer.key} (${role})`);
+    else console.log(`CHAT with ${withRole(name, role)} · ${peer.key}`);
+    console.log(`page ${page} of ${pages}  (messages ${first}-${last} of ${total}, oldest first; page 1 holds the newest)\n`);
     let day = "";
     let divided = false;
     for (const m of msgs) {
@@ -1265,6 +1529,7 @@ function cmdOpen(argv: string[]): number {
 function cmdDelete(argv: string[]): number {
   const p = parseArgs(argv, []);
   unknownFlags(p, ["squad"]);
+  const json = wantsJson(p);
   const target = p.positionals[0];
   if (!target || p.positionals.length !== 1) throw new UsageError("delete needs exactly one <TARGET>");
   checkAddressTarget(target);
@@ -1281,6 +1546,10 @@ function cmdDelete(argv: string[]): number {
     }
     const visible = visibleChat(c.store, cctx, me.aliases, peer.key);
     const n = c.store.hideChat(me.key, peer.key, visible);
+    if (json) {
+      printJson({ peer: peer.key, squad_root: c.store.root, hidden: n, had_chat: n > 0 });
+      return 0;
+    }
     if (n === 0) console.log(`No chat with ${peer.key} in your inbox; nothing deleted.`);
     else {
       console.log(

@@ -28,9 +28,9 @@ curl -fsSL https://raw.githubusercontent.com/bdsanxz/peers/main/install.sh | sh 
 | --- | --- | --- | --- |
 | `--version vX.Y.Z` | `PEERS_VERSION` | `latest` | The release to install. |
 | `--dir DIR` | `PEERS_INSTALL_DIR` | `~/.local/bin` | Where the file goes. |
-| `--from-source` | | | Bundle the release from its source with Bun instead of downloading it. |
+| `--force` | `PEERS_FORCE` | `0` | Replace the target even when it is a symlink. |
 
-A private repository needs a token with read access: set `GITHUB_TOKEN`, or sign in with the GitHub CLI (`gh auth login`).
+A private repository needs a token with read access: set `GITHUB_TOKEN`, or sign in with the GitHub CLI (`gh auth login`). The token is only tried after an unauthenticated download fails with a 404, and it never appears on a command line (curl reads it from its stdin config). The release's `peers.js.sha256` is always verified with `sha256sum` (else `shasum -a 256`); a mismatch refuses and leaves any existing file untouched. A symlinked target from a local build is left alone unless `--force` is given.
 
 ### From source
 
@@ -77,7 +77,19 @@ Agents use `peers` through the `peers` agent skill, which tells them when to mes
 | `peers open <member> [--page N]` | Prints one page of a chat: 20 messages, with page 1 the newest. It marks the messages it prints as read. Any spelling opens the same merged chat; quote tab names with spaces. |
 | `peers delete <member>` | Hides a chat from your own view. The other side keeps it. |
 
-Every command has `--help` with its details, output and exit codes. Exit code 0 means success, 1 other errors, and 2 a usage error (or a stored message whose notification failed); the error line says why. Every command also takes `--squad <dir>` to use that squad's database.
+Every command has `--help` with its details, output and exit codes. Exit code 0 means success, 1 other errors, and 2 a usage error (or a stored message whose notification failed); the error line says why. Every command also takes `--squad <dir>` to use that squad's database, and `--json` for one JSON document on stdout with no prose.
+
+With `--json` the output is one object (or one object with an array) and errors print `{"error":{"kind","message","hint"}}` on stdout with the same exit codes. Timestamps are ISO strings. Shapes:
+
+- `whoami --json`: `{"address","squad_root"}`
+- `list --json`: `{"agents":[{"address","pane","kind","status","cwd","workspace"}]}`
+- `send --json`: `{"peer","target","stored","message_id","unread","squad_root","unknown_target","did_you_mean","notify":{"outcome","reason","route","detail"},"replaced_by","reply_to","expects_reply"}`; a failed notification prints `{"error":{"kind":"timeout|failed","message","hint"},"peer","stored","message_id","unread"}` with exit 2
+- `contacts --json`: `{"squad_root","contacts":[{"address","status","replaced_by","name","role","kind","cwd","seen"}]}`
+- `chats --json` (also `inbox`): `{"me","squad_root","unread","chat_count","chats":[{"peer","unread","messages","last"}],"open_next"}`
+- `open --json`: `{"peer","page","pages","total","messages":[{"id","sender","kind","seq","sent_at","body"}],"inbox_unread"}`
+- `delete --json`: `{"peer","squad_root","hidden","had_chat"}`
+
+Error kinds are `usage`, `not_found`, `timeout` and `failed`.
 
 A message's kind is one of `request`, `ack`, `progress`, `completion`, `receipt` and `notice`. Its `--seq` ties the messages of one exchange together.
 

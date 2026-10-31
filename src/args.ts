@@ -1,4 +1,7 @@
 // A small argument reader: `--flag value`, `--flag=value`, boolean flags, `--` and positionals.
+// Every command also takes `--json` for one JSON document on stdout; it is a
+// boolean here so it never consumes the next argument, and `unknownFlags`
+// always allows it.
 
 export class UsageError extends Error {}
 
@@ -23,7 +26,7 @@ export function parseArgs(argv: string[], booleans: string[] = []): Parsed {
     const eq = a.indexOf("=");
     const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
     if (eq > 0) flags.set(name, a.slice(eq + 1));
-    else if (booleans.includes(name) || name === "help") flags.set(name, true);
+    else if (booleans.includes(name) || name === "help" || name === "json") flags.set(name, true);
     else {
       const v = argv[i + 1];
       if (v === undefined) throw new UsageError(`--${name} needs a value`);
@@ -46,5 +49,5 @@ export function bool(p: Parsed, name: string): boolean {
 
 export function unknownFlags(p: Parsed, allowed: string[]): void {
   for (const k of p.flags.keys())
-    if (k !== "help" && !allowed.includes(k)) throw new UsageError(`unknown option --${k}`);
+    if (k !== "help" && k !== "json" && !allowed.includes(k)) throw new UsageError(`unknown option --${k}`);
 }
