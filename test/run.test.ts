@@ -1571,3 +1571,109 @@ describe("peers 0.3.1 chats peer names (ISSUES row 26)", () => {
     expect(byPeer.get("bo")!.role).toBe("bo");
   });
 });
+
+describe("peers 0.3.2 qoder behind a shell (ISSUES row 27)", () => {
+  function hcStubWithGet(s: { tmp: string; bin: string }, getCase: string): void {
+    fs.writeFileSync(
+      path.join(s.bin, "hc"),
+      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\n` +
+        `if [ "$1" = "get" ]; then printf '%s\\n' "$2" >>"${s.tmp}/hc-get.log"; ${getCase}; fi\n` +
+        `if [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hc-prompts.log"; printf '%s\\n' '{"started":true,"status":"ok","turn":1}'; exit 0; fi\n` +
+        `echo "unexpected hc call: $*" >&2; exit 9\n`,
+    );
+    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
+  }
+
+  function hcOnlyShell(s: { tmp: string; bin: string }, terminals: unknown[]): void {
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals }));
+  }
+
+  test("a shell tab with qodercli foreground lists as qoder, with no get for live agents", () => {
+    const s = setup();
+    hcOnlyShell(s, [
+      { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+      { address: "t3", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+    ]);
+    hcStubWithGet(s, `case "$2" in t2) printf '%s\\n' '{"foreground":{"name":"qodercli-1.1.81"}}'; exit 0 ;; *) printf '%s\\n' '{"foreground":{"name":"zsh"}}'; exit 0 ;; esac`);
+    const list = cli(s, ["list"], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(list.code).toBe(0);
+    expect(list.out).toContain("t2  kind=qoder");
+    expect(list.out).toContain("t3  kind=muse");
+    expect(list.out).not.toContain("t2  kind=shell");
+    const logged = fs.readFileSync(s.tmp + "/hc-get.log", "utf8");
+    expect(logged).toContain("t2");
+    expect(logged).not.toContain("t3");
+  });
+
+  test("a shell tab with an opencode foreground lists as opencode", () => {
+    const s = setup();
+    hcOnlyShell(s, [{ address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" }]);
+    hcStubWithGet(s, `case "$2" in t2) printf '%s\\n' '{"foreground":{"name":"/opt/homebrew/bin/opencode"}}'; exit 0 ;; *) printf '%s\\n' '{"foreground":{"name":"zsh"}}'; exit 0 ;; esac`);
+    const list = cli(s, ["list"], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(list.code).toBe(0);
+    expect(list.out).toContain("t2  kind=opencode");
+    expect(list.out).not.toContain("kind=shell");
+  });
+
+  test("vim, failing hc get and bad JSON stay shell, one get per shell tab", () => {
+    const s = setup();
+    hcOnlyShell(s, [
+      { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+      { address: "t3", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+      { address: "t4", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ]);
+    hcStubWithGet(
+      s,
+      `case "$2" in t2) printf '%s\\n' '{"foreground":{"name":"vim"}}'; exit 0 ;; t3) exit 1 ;; t4) printf '%s\\n' 'not json'; exit 0 ;; *) printf '%s\\n' '{"foreground":{"name":"zsh"}}'; exit 0 ;; esac`,
+    );
+    const list = cli(s, ["list"], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(list.code).toBe(0);
+    expect(list.out).toContain("t2  kind=shell");
+    expect(list.out).toContain("t3  kind=shell");
+    expect(list.out).toContain("t4  kind=shell");
+    const logged = fs.readFileSync(s.tmp + "/hc-get.log", "utf8").split("\n").filter((l) => l.trim() !== "");
+    expect(logged.filter((l) => l === "t2")).toHaveLength(1);
+    expect(logged.filter((l) => l === "t3")).toHaveLength(1);
+    expect(logged.filter((l) => l === "t4")).toHaveLength(1);
+  });
+
+  test("send to a qoder tab reads as a direct notification, with no not-live wording", () => {
+    const s = setup();
+    fs.writeFileSync((s as unknown as { tmp: string }).tmp + "/squad/roster.json", JSON.stringify({ squad: "demo", goal: "g" }));
+    hcOnlyShell(s, [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "zsh", cwd: "/tmp/work/qa", state: "live", status: "idle", where: "SWE / 1" },
+    ]);
+    hcStubWithGet(s, `case "$2" in t2) printf '%s\\n' '{"foreground":{"name":"qodercli-1.1.81"}}'; exit 0 ;; *) printf '%s\\n' '{"foreground":{"name":"zsh"}}'; exit 0 ;; esac`);
+    const r = cli(s, ["send", "demo-qa", "--kind", "request", "--seq", "1", "--body", "Ping."], {
+      HERDR_PANE_ID: "",
+      HC_TERMINAL_ID: "t9",
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("notified via hcx send to t2");
+    expect(r.out).not.toContain("is not live");
+    expect(r.out).not.toContain("runs it now");
+    expect(hcxSendCalls(s)).toHaveLength(1);
+  });
+
+  test("list --json carries the resolved kind", () => {
+    const s = setup();
+    hcOnlyShell(s, [
+      { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+      { address: "t3", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+      { address: "t4", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ]);
+    hcStubWithGet(
+      s,
+      `case "$2" in t2) printf '%s\\n' '{"foreground":{"name":"qodercli-1.1.81"}}'; exit 0 ;; t3) printf '%s\\n' '{"foreground":{"name":"opencode"}}'; exit 0 ;; t4) printf '%s\\n' '{"foreground":{"name":"vim"}}'; exit 0 ;; *) printf '%s\\n' '{"foreground":{"name":"zsh"}}'; exit 0 ;; esac`,
+    );
+    const r = cli(s, ["list", "--json"], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(r.code).toBe(0);
+    const doc = JSON.parse(r.out) as { agents: { address: string; kind: string }[] };
+    const byAddr = new Map(doc.agents.map((a) => [a.address, a.kind]));
+    expect(byAddr.get("t2")).toBe("qoder");
+    expect(byAddr.get("t3")).toBe("opencode");
+    expect(byAddr.get("t4")).toBe("shell");
+  });
+});

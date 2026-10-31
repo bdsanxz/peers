@@ -5,7 +5,7 @@ import path from "node:path";
 import { UsageError, parseArgs, str, unknownFlags } from "./args.ts";
 import { iso, jsonError, printJson, wantsJson } from "./json.ts";
 import { aliases, clearPrimaryCache, loadCtx, memberKnown, memberOf, primary, type CanonCtx } from "./canonical.ts";
-import { agentList, checkTarget, isShellKind, prompt, resolveTabAddress, tabNameOf, type HerdrAgent } from "./herdr.ts";
+import { agentList, checkTarget, isShellKind, prompt, resolveShellKind, resolveTabAddress, tabNameOf, type HerdrAgent } from "./herdr.ts";
 import { ownContext, ownIdentity, register, registerIfChanged, selfAddress, squadRoot } from "./identity.ts";
 import { isMemberWord, parenMember } from "./names.ts";
 import { PAGE_SIZE, Store, nowMs, type Msg, type MsgMeta, type Profile } from "./store.ts";
@@ -42,6 +42,18 @@ function followLiveTarget(
   }
   const uniq = [...new Set(hits)];
   return { address: uniq.length === 1 ? uniq[0]! : "", candidates: uniq };
+}
+
+/** Whether a followed terminal runs an agent behind its shell wrapper: its
+ * listed kind is a shell kind but its `hc get` foreground resolves to an
+ * agent (qoder, opencode). Such a terminal is treated as live, so the
+ * delivered notification reads like a direct one instead of "<peer> is not
+ * live, but tNN runs it now". Costs at most one `hc get`, only for
+ * shell-kind terminals; non-shell kinds and misses return false with no call. */
+function followRunsAgent(agents: HerdrAgent[], followAddress: string): boolean {
+  const hit = agents.find((a) => a.address === followAddress || a.pane === followAddress);
+  if (!hit || !isShellKind(hit.kind)) return false;
+  return !isShellKind(resolveShellKind(hit.kind, hit.pane));
 }
 
 /** Whether a live terminal provably belongs to another squad: its cwd sits
@@ -753,8 +765,11 @@ function cmdList(argv: string[]): number {
   const rows: { address: string; pane: string; kind: string; status: string; cwd: string; workspace: string }[] = [];
   for (const a of agents) {
     if (mine.has(a.address.toLowerCase()) || mine.has(a.pane.toLowerCase())) continue;
-    // A plain shell (or an unknown kind) is labelled as a shell: notifications never go there.
-    const kind = isShellKind(a.kind) ? "shell" : a.kind;
+    // A shell-kind tab whose foreground runs an agent (qoder, opencode) is
+    // shown with that kind; other shells and unknown kinds list as a shell.
+    // Non-shell kinds cost no `hc get`; at most one per shell-kind tab.
+    const effective = isShellKind(a.kind) ? resolveShellKind(a.kind, a.pane) : a.kind;
+    const kind = isShellKind(effective) ? "shell" : effective;
     rows.push({ address: a.address, pane: a.pane, kind, status: a.state, cwd: a.cwd, workspace: a.workspace });
   }
   if (json) printJson({ agents: rows });
@@ -1129,8 +1144,15 @@ async function cmdSend(argv: string[]): Promise<number> {
       if (follow.address !== "") {
         const done = prompt(follow.address, text);
         if (done.ok) {
-          console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-            `${displayTarget} is not live, but ${follow.address} runs it now — ${done.detail}`);
+          // A recognised agent behind a shell wrapper (qoder, opencode) is
+          // treated as live: the delivery (one hcx send, unchanged) reads
+          // like a direct notification, with no "is not live" wording.
+          if (followRunsAgent(agents, follow.address)) {
+            console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ${done.detail}`);
+          } else {
+            console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+              `${displayTarget} is not live, but ${follow.address} runs it now — ${done.detail}`);
+          }
         } else if (!done.ok && "queued" in done && done.queued) {
           if (done.reason === "plain-shell") {
             console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +

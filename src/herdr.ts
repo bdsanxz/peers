@@ -161,6 +161,51 @@ export function isShellKind(kind: string | undefined | null): boolean {
   return k === "" || SHELLS.has(k);
 }
 
+/** A foreground basename (already lower-cased by `foregroundName`) mapped to
+ * the agent kind it runs. `opencode` runs opencode; `qodercli` with an
+ * optional `-<version>` suffix (e.g. `qodercli-1.1.81`) runs qoder. Anything
+ * else the shell runs stays a shell tab. Copied from hcx
+ * (`resolveForegroundAgent`); peers stays self-contained, no import from hcx. */
+export function resolveForegroundAgent(foreground: string): string | null {
+  if (foreground === "opencode") return "opencode";
+  if (/^qodercli(-[0-9][0-9a-z.+-]*)?$/i.test(foreground)) return "qoder";
+  return null;
+}
+
+/** The basename (lower case) of the foreground program `hc get <addr>`
+ * reports; null when it says nothing useful. A failing `hc get`,
+ * unparseable JSON, a missing name, or a shell basename all yield null, so a
+ * plain shell is never mistaken for an agent. */
+function foregroundName(address: string): string | null {
+  try {
+    const p = spawnSync("hc", ["get", address], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: LOOKUP_TIMEOUT_MS,
+    });
+    if (p.status !== 0) return null;
+    const body = JSON.parse(p.stdout as string) as { foreground?: { name?: unknown } };
+    const name = body.foreground?.name;
+    if (typeof name !== "string") return null;
+    const base = name.split("/").pop()?.toLowerCase() ?? "";
+    return base === "" || isShellKind(base) ? null : base;
+  } catch {
+    return null;
+  }
+}
+
+/** A shell kind seen through its shell wrapper: a shell-kind tab whose `hc
+ * get` foreground name resolves to an agent reports that kind (`qoder`,
+ * `opencode`). A non-shell kind is returned as is with no `hc get` call; a
+ * failing `hc get` or an unrecognised foreground keeps the shell kind. */
+export function resolveShellKind(kind: string, terminal: string): string {
+  if (!isShellKind(kind)) return kind;
+  if (terminal.trim() === "") return kind;
+  const fg = foregroundName(terminal);
+  if (!fg) return kind;
+  return resolveForegroundAgent(fg) ?? kind;
+}
+
 /** The Herdr app tab that holds a terminal, or null when the app is absent. */
 export function tabNameOf(terminal: string): string | null {
   if (terminal === "") return null;
