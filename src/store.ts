@@ -183,8 +183,9 @@ export class Store {
   }
 
   /** Adds or refreshes a profile. With `overwrite`, its name and role are replaced,
-   * even by none; otherwise only missing values are filled in. A known directory
-   * is always kept. */
+   * even by none; otherwise only missing values are filled in. Either way its
+   * `updated_at` refreshes, so a session that runs with no stated role still
+   * moves to the front of `contacts`. A known directory is always kept. */
   upsertProfile(p: Profile, overwrite: boolean): void {
     if (overwrite) {
       this.db
@@ -200,7 +201,7 @@ export class Store {
           `INSERT INTO profiles (address, runtime, name, role, cwd, updated_at) VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT(address) DO UPDATE SET name = COALESCE(excluded.name, profiles.name),
              role = COALESCE(excluded.role, profiles.role),
-             cwd = COALESCE(excluded.cwd, profiles.cwd)`,
+             cwd = COALESCE(excluded.cwd, profiles.cwd), updated_at = excluded.updated_at`,
         )
         .run(p.address, p.runtime, p.name, p.role, p.cwd, p.updated_at);
     }

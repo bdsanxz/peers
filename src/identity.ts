@@ -2,7 +2,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { ownAgent, sessionDir as herdrSessionDir, selfAddress } from "./herdr.ts";
+import { agentList, ownAgent, sessionDir as herdrSessionDir, selfAddress } from "./herdr.ts";
+import { loadCtx, primary } from "./canonical.ts";
 import { nowMs, type Store } from "./store.ts";
 
 export { selfAddress };
@@ -74,13 +75,22 @@ export function ownIdentity(
   return { role, name };
 }
 
-/** Records this session's own profile in a squad database. A role from --role, $PEERS_ROLE or
- * .peers.json replaces the stored role and name; without one, only missing values are filled. */
+/** Records this session's own profile in a squad database, under its canonical
+ * key: a "Lena (lead)" session registers as "lead", never as a second peer.
+ * A role from --role, $PEERS_ROLE or .peers.json replaces the stored role and
+ * name; without one, only missing values are filled, and the session's own
+ * `updated_at` still refreshes so `seen` stays current. */
 export function register(store: Store, me: string, dir: string, kind: string): void {
   const { role, name } = ownIdentity(undefined, undefined, [process.cwd(), dir]);
   const overwrite = role !== null;
+  let key = me;
+  try {
+    key = primary(me, loadCtx(store.root, agentList(), store.contacts("")));
+  } catch {
+    // canonical resolution is best-effort; the raw spelling still registers
+  }
   store.upsertProfile(
-    { address: me, runtime: kind, name, role, cwd: dir, updated_at: nowMs() },
+    { address: key, runtime: kind, name, role, cwd: dir, updated_at: nowMs() },
     overwrite,
   );
 }

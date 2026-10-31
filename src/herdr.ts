@@ -89,7 +89,9 @@ export function hcAgentList(): HerdrAgent[] {
     out.push({
       address: named,
       pane: id,
-      kind: typeof rec["agent"] === "string" && (rec["agent"] as string) !== "" ? (rec["agent"] as string) : "herdr",
+      // An empty agent field means the kind is unknown, never an agent: it is
+      // kept empty so routing and `peers list` treat it like a plain shell.
+      kind: typeof rec["agent"] === "string" ? (rec["agent"] as string) : "",
       state,
       cwd: typeof rec["cwd"] === "string" ? (rec["cwd"] as string) : "",
       workspace: typeof rec["where"] === "string" ? (rec["where"] as string) : "",
@@ -139,6 +141,19 @@ export interface PromptFrom {
 
 const SHELLS = new Set(["zsh", "sh", "bash", "fish", "dash", "ksh", "nu", "pwsh"]);
 
+/** Agent programs peers recognises in the foreground of a shell wrapper: a
+ * shell kind becomes the foreground program only when it names one of these.
+ * Anything else the shell runs (such as `vim` or `python`) stays a shell tab. */
+const KNOWN_FOREGROUND_AGENTS = new Set(["opencode"]);
+
+/** Whether a kind is a plain shell: a shell name, or an unknown kind (empty
+ * or missing). Unknown kinds are never treated as agents. */
+export function isShellKind(kind: string | undefined | null): boolean {
+  if (kind === undefined || kind === null) return true;
+  const k = kind.trim().toLowerCase();
+  return k === "" || SHELLS.has(k);
+}
+
 /** Per-run cache of `hc get` foreground lookups: one lookup per address. */
 const foregroundOf = new Map<string, string | null>();
 
@@ -161,14 +176,14 @@ function hcForeground(address: string): string | null {
 
 /** The kind peers treats a live target as. hc lists a tab that runs an agent
  * inside a login-shell wrapper as a plain shell (`agent: "zsh"`), so a shell
- * kind is checked against the foreground program `hc get` reports: a non-shell
- * foreground such as `opencode` is the real kind. A failed lookup, or a
- * missing or shell foreground, keeps the shell kind, so a plain shell always
- * gets the tagged send. */
+ * kind is checked against the foreground program `hc get` reports: only a
+ * known agent foreground such as `opencode` is the real kind. A failed
+ * lookup, a missing or shell foreground, or any other program (such as `vim`)
+ * keeps the shell kind. */
 export function effectiveKind(agent: HerdrAgent): string {
   if (!SHELLS.has(agent.kind.trim().toLowerCase())) return agent.kind;
   const fg = hcForeground(agent.pane);
-  if (fg === null || SHELLS.has(fg)) return agent.kind;
+  if (fg === null || !KNOWN_FOREGROUND_AGENTS.has(fg)) return agent.kind;
   return fg;
 }
 
@@ -232,30 +247,35 @@ export function resolveTabAddress(name: string, reserved: boolean): TabResolutio
   return {};
 }
 
-/** Whether hc's send result confirms delivery: a non-null `started` or a
- * non-empty `status`. When both are null, hc accepted the command but the
- * terminal cannot run it, as for a plain shell or an opencode TUI. */
-function hcConfirmsDelivery(json: unknown): boolean {
-  if (typeof json !== "object" || json === null) return false;
-  const rec = json as Record<string, unknown>;
-  const started = rec["started"];
-  if (started !== null && started !== undefined && started !== false) return true;
-  const status = rec["status"];
-  return typeof status === "string" && status !== "";
+/** How hc's send result reads: `confirmed` when a turn started, `not-started`
+ * when hc confirms the send started no turn (`started: false`, which must
+ * never read as confirmed), and `unconfirmed` when hc reports no status at
+ * all, as for an opencode TUI. */
+type DeliveryConfirmation = "confirmed" | "not-started" | "unconfirmed";
+
+function hcDelivery(json: unknown): DeliveryConfirmation {
+  if (typeof json !== "object" || json === null) return "unconfirmed";
+  const started = (json as Record<string, unknown>)["started"];
+  if (started === true) return "confirmed";
+  if (started === false) return "not-started";
+  return "unconfirmed";
 }
 
 function hcSend(target: string, text: string, env: NodeJS.ProcessEnv): { ok: boolean; detail: string } {
   try {
     const p = spawnSync("hc", ["send", target, text], { encoding: "utf8", env });
     if (p.status === 0) {
-      let confirmed = false;
+      let confirmation: DeliveryConfirmation = "unconfirmed";
       try {
-        confirmed = hcConfirmsDelivery(JSON.parse(p.stdout as string));
+        confirmation = hcDelivery(JSON.parse(p.stdout as string));
       } catch {
-        confirmed = false;
+        confirmation = "unconfirmed";
       }
       const detail = `notified via hc send to ${target}`;
-      return { ok: true, detail: confirmed ? detail : `${detail} (delivery not confirmed by hcx)` };
+      if (confirmation === "confirmed") return { ok: true, detail };
+      if (confirmation === "not-started")
+        return { ok: true, detail: `${detail} (message not started, do not resend; it is stored)` };
+      return { ok: true, detail: `${detail} (delivery not confirmed by hc)` };
     }
     const err = (p.stderr as string).trim();
     if (err === "") {
@@ -271,11 +291,10 @@ function hcSend(target: string, text: string, env: NodeJS.ProcessEnv): { ok: boo
 
 /** One fire-and-forget prompt over herdr-core. Never waits for an answer.
  * With `from`, it goes without HC_TERMINAL_ID, so hc adds no <hc from> tag, and
- * the body is sent as is. A failed untagged send is retried the old way. A
- * plain shell target gets the old tagged send: it would run the body as a
- * command. */
+ * the body is sent as is. A failed untagged send is retried the old way. An
+ * unknown or shell target kind keeps the tagged send. */
 function hcPrompt(target: string, text: string, from?: PromptFrom): { ok: boolean; detail: string } {
-  if (from && !SHELLS.has((from.targetKind ?? "").toLowerCase())) {
+  if (from && !isShellKind(from.targetKind)) {
     const env = { ...process.env };
     delete env.HC_TERMINAL_ID;
     const plain = hcSend(target, text, env);

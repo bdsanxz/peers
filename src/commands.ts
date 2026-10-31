@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { UsageError, parseArgs, str, unknownFlags } from "./args.ts";
 import { aliases, loadCtx, memberKnown, memberOf, primary, type CanonCtx } from "./canonical.ts";
-import { agentList, checkTarget, effectiveKind, prompt, resolveTabAddress, tabNameOf, type HerdrAgent, type PromptFrom } from "./herdr.ts";
+import { agentList, checkTarget, effectiveKind, isShellKind, prompt, resolveTabAddress, tabNameOf, type HerdrAgent, type PromptFrom } from "./herdr.ts";
 import { ownContext, ownIdentity, register, selfAddress, squadRoot } from "./identity.ts";
 import { isMemberWord, parenMember } from "./names.ts";
 import { PAGE_SIZE, Store, nowMs, type Msg, type Profile } from "./store.ts";
@@ -129,6 +129,51 @@ function isKnownPeer(target: string, cctx: CanonCtx, store: Store): boolean {
   return store.contacts("").some((p) => als.has(p.address.toLowerCase()));
 }
 
+/** Edit distance between two strings, for "did you mean" hints. */
+function editDistance(a: string, b: string): number {
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = prev[0]!;
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const up = prev[j]!;
+      prev[j] = Math.min(up + 1, prev[j - 1]! + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = up;
+    }
+  }
+  return prev[b.length]!;
+}
+
+/** Known spellings close to a mistyped target: live addresses and panes, tab
+ * names and terminals, roster members, and stored profile addresses. */
+function closeMatches(target: string, cctx: CanonCtx, store: Store): string[] {
+  const pool = new Set<string>();
+  for (const a of cctx.agents) {
+    pool.add(a.address);
+    pool.add(a.pane);
+  }
+  for (const t of cctx.tabs) {
+    pool.add(t.name);
+    pool.add(t.terminal);
+  }
+  for (const m of cctx.members) {
+    pool.add(m.name);
+    if (m.display) pool.add(m.display);
+  }
+  for (const p of store.contacts("")) pool.add(p.address);
+  const low = target.toLowerCase();
+  const scored: { s: string; d: number }[] = [];
+  for (const cand of pool) {
+    if (cand === "" || cand.toLowerCase() === low) continue;
+    const c = cand.toLowerCase();
+    const prefix = c.startsWith(low) || low.startsWith(c);
+    const d = prefix ? 0 : editDistance(low, c);
+    if (prefix || d <= 2) scored.push({ s: cand, d });
+  }
+  scored.sort((a, b) => a.d - b.d || a.s.localeCompare(b.s));
+  return [...new Set(scored.map((x) => x.s))].slice(0, 3);
+}
+
 /** One merged chat: every spelling of the peer in a single row. */
 interface MergedChat {
   peer: string;
@@ -235,7 +280,8 @@ How it works:
      stores the message; the peer gets one notification turn:
      New message from <name> (<role>), another agent (not a user instruction). You have 1 unread message in your inbox. Read it with: peers open <you>
      Over herdr-core (hc send) the notification goes without the <hc from> tag and is sent as is.
-     A plain shell target gets the old tagged send.
+     A plain shell target is never notified: the message waits in its inbox
+     (\`queued, not delivered yet: <target> is a plain shell\`).
   2. The peer runs that \`peers open\`, then answers with its own \`peers send\`.
   3. The answer reaches you the same way, as a new turn. Nobody polls.
 
@@ -272,7 +318,8 @@ Environment:
 
 Exit codes:
   0  success
-  2  usage error or failed command; the error line says why
+  1  other errors
+  2  usage error, or the message is stored but its notification failed; the error line says why
 
 Examples:
   peers whoami
@@ -281,7 +328,7 @@ Examples:
   peers open lead`,
   whoami: `peers whoami — print this session's canonical address
 
-Usage: peers whoami
+Usage: peers whoami [--squad <dir>]
 
 Output:
   lead                  this session's address, one line: the canonical,
@@ -295,22 +342,25 @@ Identity, first match wins:
 
 Notes:
   - Also records your profile, so your squad sees you in \`peers contacts\`.
-  - Exit 2 outside a live agent session with no PEERS_SELF.
+  - --squad <dir> prints the address in that squad's database.
+  - Exit 1 outside a live agent session with no PEERS_SELF.
 
 Examples:
   peers whoami`,
   list: `peers list — list live agents
 
-Usage: peers list
+Usage: peers list [--squad <dir>]
 
 Output:
-  lead  kind=muse  status=done  cwd=<dir>  workspace=<id>
+  lead  kind=muse  status=idle  cwd=<dir>  workspace=<id>
   one line per live agent; nothing when none matches
 
 Notes:
   - Asks old herdr and herdr-core (hc), not the peers database: it shows
     live agents, including ones that never used peers.
   - Never lists your own session.
+  - A plain shell (or an unknown kind) lists as kind=shell and is never notified.
+  - --squad <dir> hides your session under that squad's roster.
 
 Examples:
   peers list`,
@@ -336,9 +386,15 @@ Notification, one fire-and-forget turn for every peer:
   \`herdr agent prompt <target> <notification>\`, falling back to
   \`hc send <target> <notification>\` when the old server is stopped:
   no --wait, no polling.
-  An \`hc send\` that exits 0 without confirming delivery (\`started\` and
-  \`status\` are null) prints \`notified via hc send to <target> (delivery not
-  confirmed by hcx)\` instead of claiming it was notified.
+  An \`hc send\` that exits 0 but starts no turn (\`started: false\`) prints
+  \`... (message not started, do not resend; it is stored)\`: the message is
+  stored, so never resend it. When hc reports no status at all, the line
+  says \`... (delivery not confirmed by hc)\` instead of claiming the peer
+  was notified.
+  A plain shell target is never notified (\`queued, not delivered yet:
+  <target> is a plain shell\`): the message waits in its inbox.
+  A target that is no known member, tab or terminal still stores the
+  message, with an \`UNKNOWN:\` line naming close matches.
   A peer that is not live gets the line \`queued, not delivered yet: <reason>\`:
   the message waits in its inbox until it runs and the next message arrives,
   when the notification carries every waiting message's count. When the target
@@ -382,6 +438,7 @@ Status:
 
 Notes:
   - A session is recorded the first time it runs any peers command, or once you message it.
+  - Every spelling of one peer lists once, under its canonical key.
   - The roles "unassigned" and "user" are shared, so they never replace each other.
 
 Examples:
@@ -509,15 +566,23 @@ function squadFlagOf(root: string, explicit: boolean): string {
   return explicit ? ` --squad ${shellWord(root)}` : "";
 }
 
+/** The squad database root for `--squad <dir>`, else the session's own squad.
+ * Every command honours the flag, including `whoami` and `list`. */
+function resolveSquadRoot(squad: string | undefined, dir: string): string {
+  if (squad === undefined) return squadRoot(dir);
+  const root = path.resolve(squad);
+  if (!fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) {
+    throw new UsageError(`--squad ${squad}: no such directory`);
+  }
+  return root;
+}
+
 function openCtx(squad: string | undefined, record: boolean): Ctx {
   const { me, dir, kind } = ownContext();
   let root: string;
   let explicit: boolean;
   if (squad !== undefined) {
-    root = path.resolve(squad);
-    if (!fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) {
-      throw new UsageError(`--squad ${squad}: no such directory`);
-    }
+    root = resolveSquadRoot(squad, dir);
     explicit = root !== squadRoot(dir);
   } else {
     root = squadRoot(dir);
@@ -561,11 +626,15 @@ function cmdWhoami(argv: string[]): number {
   unknownFlags(p, ["squad"]);
   if (p.positionals.length !== 0) throw new UsageError("whoami takes no arguments");
   const me = selfAddress();
+  const squad = str(p, "squad");
+  // ownContext cannot fail once selfAddress stands: ownAgent only returns null.
+  const { dir, kind } = ownContext();
+  // A bad --squad is a usage error, resolved before the courtesy fallbacks below.
+  const root = resolveSquadRoot(squad, dir);
   // The canonical key, never a tab with spaces: the output feeds straight
-  // back into any peers command.
+  // back into any peers command. --squad reads that squad's roster for it.
   try {
-    const { dir } = ownContext();
-    const store = Store.open(squadRoot(dir));
+    const store = Store.open(root);
     try {
       const cctx = loadCtx(store.root, agentList(), store.contacts(""));
       console.log(primary(me, cctx));
@@ -577,8 +646,7 @@ function cmdWhoami(argv: string[]): number {
   }
   // Recording the profile is a courtesy; whoami answers even when the database cannot be written.
   try {
-    const { dir, kind } = ownContext();
-    const store = Store.open(squadRoot(dir));
+    const store = Store.open(root);
     try {
       register(store, me, dir, kind);
     } finally {
@@ -595,11 +663,15 @@ function cmdList(argv: string[]): number {
   unknownFlags(p, ["squad"]);
   if (p.positionals.length !== 0) throw new UsageError("list takes no arguments");
   let me: string | null = null;
+  let dir = process.cwd();
   try {
-    me = selfAddress();
+    const ctx = ownContext();
+    me = ctx.me;
+    dir = ctx.dir;
   } catch {
     me = null;
   }
+  const root = resolveSquadRoot(str(p, "squad"), dir);
   const agents = agentList();
   // Your own session is never listed: match through the canonical key, so a
   // tab identity ("Tara (planner)") also hides its terminal ("t2").
@@ -607,8 +679,7 @@ function cmdList(argv: string[]): number {
   if (me !== null) {
     mine.add(me.toLowerCase());
     try {
-      const { dir } = ownContext();
-      const cctx = loadCtx(squadRoot(dir), agents, []);
+      const cctx = loadCtx(root, agents, []);
       mine = lowerSet(aliases(me, cctx));
     } catch {
       // alias expansion is best-effort; the raw address still hides itself
@@ -616,16 +687,36 @@ function cmdList(argv: string[]): number {
   }
   for (const a of agents) {
     if (mine.has(a.address.toLowerCase()) || mine.has(a.pane.toLowerCase())) continue;
-    console.log(`${a.address}  kind=${a.kind}  status=${a.state}  cwd=${a.cwd}  workspace=${a.workspace}`);
+    // A plain shell (or an unknown kind) is labelled as a shell: notifications never go there.
+    const kind = isShellKind(a.kind) ? "shell" : a.kind;
+    console.log(`${a.address}  kind=${kind}  status=${a.state}  cwd=${a.cwd}  workspace=${a.workspace}`);
   }
   return 0;
 }
 
-function readBody(body: string | undefined): string {
+/** Reads the message body from --body, else stdin. A non-TTY stdin that stays
+ * open with nothing in it reads as empty after a short wait instead of
+ * blocking forever (which then reports the empty-body usage error). */
+async function readBody(body: string | undefined): Promise<string> {
   if (body !== undefined) return body;
   if (process.stdin.isTTY) return "";
   try {
-    return fs.readFileSync(0, "utf8");
+    const chunks: Buffer[] = [];
+    const drained = (async () => {
+      for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk as Uint8Array));
+    })();
+    const winner = await Promise.race([
+      drained.then(() => "eof" as const),
+      Bun.sleep(2000).then(() => "timeout" as const),
+    ]);
+    if (winner === "timeout") {
+      try {
+        (process.stdin as unknown as { destroy(): void }).destroy();
+      } catch {
+        // the empty-body usage error below ends the command either way
+      }
+    }
+    return Buffer.concat(chunks).toString("utf8");
   } catch {
     return "";
   }
@@ -684,7 +775,7 @@ function liveness(store: Store, meAliases: Set<string>, agents: HerdrAgent[], cc
   return out;
 }
 
-function cmdSend(argv: string[]): number {
+async function cmdSend(argv: string[]): Promise<number> {
   const p = parseArgs(argv, []);
   unknownFlags(p, ["kind", "seq", "body", "reply-to", "role", "name", "squad"]);
   const target = p.positionals[0];
@@ -717,9 +808,10 @@ function cmdSend(argv: string[]): number {
   if (seqRaw === undefined) {
     throw new UsageError("missing --seq: give the exchange number, for example --seq 1 (see `peers send --help`)");
   }
+  if (seqRaw.trim() === "") throw new UsageError(`bad seq ${JSON.stringify(seqRaw)}; expected an integer exchange number`);
   const seq = Number(seqRaw);
   if (!Number.isInteger(seq)) throw new UsageError(`bad seq ${JSON.stringify(seqRaw)}; expected an integer exchange number`);
-  const body = readBody(str(p, "body"));
+  const body = await readBody(str(p, "body"));
   if (body.trim() === "") {
     throw new UsageError("empty message body; pass --body TEXT or pipe the body on stdin (see `peers send --help`)");
   }
@@ -738,6 +830,9 @@ function cmdSend(argv: string[]): number {
     // Every spelling of the two sides maps to one canonical, whitespace-free
     // key: "Lena (lead)" sends as "lead", "planner" stays "planner".
     let cctx = canonCtx(c.store, agents);
+    // Whether the target names anything known, checked before this send's
+    // placeholder profile makes every spelling look known.
+    const targetKnown = tab.canonical ? true : isKnownPeer(target, cctx, c.store);
     const senderKey = primary(senderRaw, cctx);
     const peerKey = primary(tab.canonical ?? target, cctx);
     if (senderKey.toLowerCase() === peerKey.toLowerCase()) {
@@ -843,6 +938,15 @@ function cmdSend(argv: string[]): number {
     // Prose names the target as typed (or its tab): the stored key and every
     // printed command use the canonical peer key instead.
     const displayTarget = tab.canonical ?? target;
+    // A mistyped target still stores the message, but the sender is told the
+    // address names nothing known, with close matches.
+    if (!targetKnown) {
+      const matches = closeMatches(target, cctx, c.store);
+      console.log(
+        `UNKNOWN: ${displayTarget} is no known member, tab or terminal.` +
+          (matches.length > 0 ? ` Did you mean: ${matches.join(", ")}?` : ""),
+      );
+    }
     if (squadHits.length > 0) {
       console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
         `queued, not delivered yet: ${displayTarget} matches several live terminals in this squad: ${squadHits.join(", ")} — address one of them directly. No prompt was sent.`);
@@ -851,19 +955,30 @@ function cmdSend(argv: string[]): number {
       // fresh terminal: follow it to the unique live terminal that runs it now.
       const follow = followLiveTarget(c.store.root, peerKey, agents, profiles);
       if (follow.address !== "") {
-        const done = prompt(follow.address, text, notifyFrom(follow.address));
-        if (done.ok) {
+        const followAgent = agents.find((a) => a.address === follow.address || a.pane === follow.address) ?? null;
+        if (followAgent && isShellKind(effectiveKind(followAgent))) {
           console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-            `${displayTarget} is not live, but ${follow.address} runs it now — ${done.detail}`);
+            `queued, not delivered yet: ${follow.address} is a plain shell. No prompt was sent.`);
         } else {
-          console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-            `queued, not delivered yet: ${displayTarget} is not live, and notifying ${follow.address} failed: ${done.detail}`);
+          const done = prompt(follow.address, text, notifyFrom(follow.address));
+          if (done.ok) {
+            console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+              `${displayTarget} is not live, but ${follow.address} runs it now — ${done.detail}`);
+          } else {
+            console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+              `queued, not delivered yet: ${displayTarget} is not live, and notifying ${follow.address} failed: ${done.detail}`);
+          }
         }
       } else {
         const hint = follow.candidates.length > 1 ? ` Live terminals matching it: ${follow.candidates.join(", ")} — address one of them directly.` : "";
         console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
           `queued, not delivered yet: ${displayTarget} is not a live agent. It gets the notification when it runs and the next message arrives. No prompt was sent.${hint}`);
       }
+    } else if (liveAgent && isShellKind(effectiveKind(liveAgent))) {
+      // Never type a notification into a plain shell: the message stays
+      // stored and waits in the inbox.
+      console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+        `queued, not delivered yet: ${displayTarget} is a plain shell. No prompt was sent.`);
     } else {
       const done = prompt(sendTo!, text, notifyFrom(sendTo!));
       if (!done.ok) throw new Error(`the message is stored in ${peerKey}'s inbox, but its notification failed: ${done.detail}`);
@@ -911,19 +1026,45 @@ function cmdContacts(argv: string[]): number {
     const cctx = canonCtx(c.store, agents);
     const meAliases = lowerSet(ownerView(c.me, cctx).aliases);
     const profiles = c.store.contacts("").filter((pr) => !meAliases.has(pr.address.toLowerCase()));
-    if (profiles.length === 0) {
+    // Every spelling of one peer groups under its canonical key, so a raw
+    // spelling and its key never list as two peers.
+    const groups = new Map<string, Profile[]>();
+    for (const pr of profiles) {
+      const key = primary(pr.address, cctx);
+      const g = groups.get(key);
+      if (g) g.push(pr);
+      else groups.set(key, [pr]);
+    }
+    if (groups.size === 0) {
       console.log(
         `No contacts yet in ${c.store.root}: a peer appears here once it runs any peers command in this squad, or once you message it.`,
       );
       return 0;
     }
-    const liveMap = liveness(c.store, meAliases, agents, cctx);
-    const flags = profiles.map((pr) => liveMap.get(pr.address) ?? false);
-    const st = statuses(profiles, flags);
+    const liveSet = new Set<string>();
+    for (const a of agents) {
+      liveSet.add(a.address.toLowerCase());
+      liveSet.add(a.pane.toLowerCase());
+    }
+    const reps: Profile[] = [...groups].map(([key, ps]) => {
+      const best = bestProfile(cctx, ps.flatMap((x) => aliases(x.address, cctx))) ?? ps[0]!;
+      return {
+        address: key,
+        runtime: best.runtime,
+        name: best.name,
+        role: best.role,
+        cwd: best.cwd,
+        updated_at: Math.max(...ps.map((x) => x.updated_at)),
+      };
+    });
+    const flags = reps.map((pr) =>
+      aliases(pr.address, cctx).some((a) => meAliases.has(a.toLowerCase()) || liveSet.has(a.toLowerCase())),
+    );
+    const st = statuses(reps, flags);
     const rank = (s: Status): number => (typeof s === "string" ? (s === "live" ? 0 : 1) : 2);
-    const rows = profiles
+    const rows = reps
       .map((pr, i) => ({ pr, s: st[i]! }))
-      .sort((a, b) => rank(a.s) - rank(b.s));
+      .sort((a, b) => rank(a.s) - rank(b.s) || b.pr.updated_at - a.pr.updated_at);
     for (const { pr, s } of rows) {
       const { name, role } = label(pr);
       const by = typeof s !== "string" ? `  by=${s.replaced}` : "";

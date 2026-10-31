@@ -60,14 +60,14 @@ Agents use `peers` through the `peers` agent skill, which tells them when to mes
 | Command | What it does |
 | --- | --- |
 | `peers whoami` | Prints this session's canonical address, such as `lead` (whitespace-free, feeds back into every command). |
-| `peers list` | Lists live herdr agents. |
+| `peers list` | Lists live herdr agents. Plain shells list as `kind=shell` and are never notified. |
 | `peers send <member> --kind <kind> --seq <n> --body TEXT` | Stores a message and notifies the peer with one `herdr agent prompt`. The body may come on stdin instead of `--body`. |
 | `peers contacts` | Lists every peer profile in the squad's database, with its status: `live`, `offline`, or `replaced` by the session that holds its role now. |
 | `peers chats` (or `peers inbox`) | Lists your chats with their unread counts, and whether the peer has read your last message. |
 | `peers open <member> [--page N]` | Prints one page of a chat: 20 messages, with page 1 the newest. It marks the messages it prints as read. Any spelling opens the same merged chat; quote tab names with spaces. |
 | `peers delete <member>` | Hides a chat from your own view. The other side keeps it. |
 
-Every command has `--help` with its details, output and exit codes. Exit code 2 means a usage error or a failed command, and the error line says why. Every command also takes `--squad <dir>` to use that squad's database.
+Every command has `--help` with its details, output and exit codes. Exit code 0 means success, 1 other errors, and 2 a usage error (or a stored message whose notification failed); the error line says why. Every command also takes `--squad <dir>` to use that squad's database.
 
 A message's kind is one of `request`, `ack`, `progress`, `completion`, `receipt` and `notice`. Its `--seq` ties the messages of one exchange together.
 
@@ -82,9 +82,9 @@ Conversations and peer profiles live in one SQLite database per squad, at `~/.lo
 - **Messages.** Each message is stored once, under the sender's and recipient's canonical keys.
 - **One chat per peer.** Every spelling of a peer (member name, role, tab name, terminal, pane id, stale address of a replaced session) maps to one canonical, whitespace-free key. Reads merge all spellings, so chats never fragment and rows stored under older spellings stay readable without any migration.
 - **Deleting a chat** records how far the deleter's view is cleared. The other side's view stays unchanged.
-- **No notification queue.** Delivery is one `herdr agent prompt` at send time. When the peer is not live or the prompt fails, the message simply waits in the inbox; the next send's notification carries the waiting count.
+- **No notification queue.** Delivery is one `herdr agent prompt` at send time. When the peer is not live or the prompt fails, the message simply waits in the inbox; the next send's notification carries the waiting count. Asking for help never runs anything: `--help` or `-h` anywhere before `--` prints that command's help, even after a target.
 
-- **hc notifications are untagged.** Over `hc send` the notification is sent without `HC_TERMINAL_ID`, so hc adds no `<hc from>` tag, and the body is sent as is; it already says it comes from another agent, not a user instruction. The sender's display name comes from `herdr-app ls` (the display name stated with `--name` wins; the address is the last fallback). A tab with several terminals is notified on the one with the `app` field, and renaming a tab starts a new chat. If the untagged send fails, `peers` retries the old tagged send. An `hc send` that exits 0 but returns no `started` or `status` confirms no delivery, so the `SENT` line says `(delivery not confirmed by hcx)` instead of claiming the peer was notified. A shell-looking tab is checked against `hc get` before the tagged send: when hc lists a tab as a shell (`zsh`, `sh`, `bash`, ...) but its foreground program is a real agent running inside a login-shell wrapper (such as `opencode`), it gets the untagged send like any other agent. A plain shell — an empty or shell foreground, or no `hc get` answer — always gets the old tagged send, because it would run the text as a command.
+- **hc notifications are untagged.** Over `hc send` the notification is sent without `HC_TERMINAL_ID`, so hc adds no `<hc from>` tag, and the body is sent as is; it already says it comes from another agent, not a user instruction. The sender's display name comes from `herdr-app ls` (the display name stated with `--name` wins; the address is the last fallback). A tab with several terminals is notified on the one with the `app` field, and renaming a tab starts a new chat. If the untagged send fails, `peers` retries the old tagged send. An `hc send` that exits 0 but starts no turn (`started: false`) is never reported as confirmed: the `SENT` line says `(message not started, do not resend; it is stored)`, and the message is never resent. When hc reports no status at all, the line says `(delivery not confirmed by hc)` instead of claiming the peer was notified. A shell-looking tab is checked against `hc get`: when its foreground program is a known agent running inside a login-shell wrapper (such as `opencode`), it gets the untagged send like any other agent. A plain shell — a shell foreground (such as `vim` or `zsh`), an unknown kind, or no `hc get` answer — is never notified: the message waits in its inbox (`queued, not delivered yet: <target> is a plain shell`), because typing it there would run it as a command. A `send` to a target that is no known member, tab or terminal still stores the message, with an `UNKNOWN:` line naming close matches.
 
 Environment variables:
 

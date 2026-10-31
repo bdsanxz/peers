@@ -12,3 +12,10 @@ Every issue reported against `peers` is logged here first, then worked. Newest l
 | 6 | 2026-10-31 | owner review | 0.1.6 | Unclear missing-`--seq` error; unconfirmed hcx delivery printed as sent | Fixed in 0.1.7 |
 | 7 | 2026-10-31 | owner review | 0.1.7 | A notification to an opencode agent is sent tagged with <hc from> because hc lists the tab as zsh | Fixed in 0.1.8 |
 | 8 | 2026-10-31 | owner request | 0.1.8 | Notifications end with a redundant sender footer; the owner wants none | Fixed in 0.1.9 |
+| 9 | 2026-10-31 | owner review | 0.1.9 | `--help` after a target runs the command: `peers delete lead --help` deletes the chat, `peers open lead --help` consumes unread, `peers send ... --help` sends; `peers --squad D open --help` fails and `peers --squad=D open` is an unknown command | Fixed in 0.1.10 |
+| 10 | 2026-10-31 | owner review | 0.1.9 | `started: false` is reported as confirmed delivery; the unconfirmed-delivery warning says "not confirmed by hcx" although the route is hc | Fixed in 0.1.10 |
+| 11 | 2026-10-31 | owner review | 0.1.9 | Foreground detection treats any program (such as `vim`) as an agent, and an unknown kind is notified instead of kept as a shell | Fixed in 0.1.10 |
+| 12 | 2026-10-31 | owner review | 0.1.9 | Plain shells are typed into by the notification; `peers list` shows raw shell kinds such as `zsh` | Fixed in 0.1.10 |
+| 13 | 2026-10-31 | owner review | 0.1.9 | A `send` to a target that is no known member, tab or terminal stores the message and exits 0 with no hint that the address is unknown | Fixed in 0.1.10 |
+| 14 | 2026-10-31 | owner review | 0.1.9 | `contacts` shows one peer twice (raw spelling plus canonical key) and `seen` goes stale for a session with no role | Fixed in 0.1.10 |
+| 15 | 2026-10-31 | owner review | 0.1.9 | Small items: `--seq=` is accepted as 0; `whoami`/`list` ignore `--squad`; a non-TTY stdin that stays open blocks forever; `peers list` help shows `status=done` but the code maps it to `idle`; help omits exit 1 | Fixed in 0.1.10 |

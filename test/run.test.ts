@@ -270,7 +270,8 @@ describe("peers over herdr agent prompt", () => {
     fs.chmodSync(path.join(s.bin, "hc"), 0o755);
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
-    expect(r.out).toContain("notified via hc send to t2 (delivery not confirmed by hcx)");
+    expect(r.out).toContain("notified via hc send to t2 (delivery not confirmed by hc)");
+    expect(r.out).not.toContain("hcx");
   });
 
   test("a failed hc send is reported and exits 2", () => {
@@ -346,7 +347,7 @@ describe("peers over herdr agent prompt", () => {
     expect(logged[1]).not.toContain("— from ");
   });
 
-  test("hc send keeps the tagged send for a plain shell", () => {
+  test("a plain shell is never notified", () => {
     const s = setup();
     fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
     fs.writeFileSync(
@@ -360,12 +361,14 @@ describe("peers over herdr agent prompt", () => {
     );
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
-    // hc get reports a shell foreground, so the target stays a plain shell.
+    expect(r.out).toContain("SENT t2: stored in its inbox (1 unread message)");
+    expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
+    // hc get still runs to read the foreground, but no hc send is attempted.
     expect(fs.readFileSync(s.tmp + "/hc-get.log", "utf8").trim()).toBe("t2");
-    expect(fs.readFileSync(s.tmp + "/hc-prompts.log", "utf8")).toContain("another agent (not a user instruction)");
-    expect(fs.readFileSync(s.tmp + "/hc-prompts.log", "utf8")).not.toContain("— from ");
-    // Tagged: HC_TERMINAL_ID stays in the environment.
-    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("t9");
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
+    // The message waits in the inbox.
+    const inbox = cli(s, ["chats"], { PEERS_SELF: "t2", HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(inbox.out).toContain("1 unread message");
   });
 
   test("an opencode tab listed as a shell is notified untagged", () => {
@@ -410,7 +413,7 @@ describe("peers over herdr agent prompt", () => {
     expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("unset");
   });
 
-  test("a failed hc get keeps the shell's tagged send", () => {
+  test("a failed hc get keeps the shell queued", () => {
     const s = setup();
     fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
     fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
@@ -424,11 +427,11 @@ describe("peers over herdr agent prompt", () => {
     fs.chmodSync(path.join(s.bin, "hc"), 0o755);
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
-    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("t9");
-    expect(fs.readFileSync(s.hcPrompts, "utf8")).not.toContain("— from ");
+    expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
   });
 
-  test("unparseable hc get JSON keeps the shell's tagged send", () => {
+  test("unparseable hc get JSON keeps the shell queued", () => {
     const s = setup();
     fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
     fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
@@ -442,8 +445,8 @@ describe("peers over herdr agent prompt", () => {
     fs.chmodSync(path.join(s.bin, "hc"), 0o755);
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
-    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("t9");
-    expect(fs.readFileSync(s.hcPrompts, "utf8")).not.toContain("— from ");
+    expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
   });
 
   test("a Herdr tab name is the address, stored under its canonical spelling", () => {
@@ -1061,7 +1064,258 @@ describe("peers canonical addresses (0.1.5) continued", () => {
     expect(cli(s, ["whoami"], { PEERS_SELF: "Lena (lead)", HERDR_PANE_ID: "", PEERS_ROLE: "lead" }).code).toBe(0);
     const contacts = cli(s, ["contacts"]);
     expect(contacts.code).toBe(0);
-    expect(contacts.out).toContain("Lena (lead)  status=live");
+    expect(contacts.out).toContain("lead  status=live");
+    expect(contacts.out).not.toContain("Lena (lead)");
   });
 });
+});
+
+describe("peers 0.1.10 help safety and notification correctness", () => {
+  function hcOnly(s: { tmp: string; bin: string }, terminals: unknown[]): void {
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals }));
+  }
+
+  function hcSendStub(s: { tmp: string; bin: string }, body: string, get = `printf '%s\\n' '{"foreground":{"name":"zsh"}}'`): void {
+    fs.writeFileSync(
+      path.join(s.bin, "hc"),
+      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "get" ]; then printf '%s\\n' "$2" >>"${s.tmp}/hc-get.log"; ${get}; exit 0; fi\nif [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hc-prompts.log"; printf '%s\\n' '${body}'; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
+    );
+    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
+  }
+
+  const T9 = { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" };
+  const T2MUSE = { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" };
+  const hcEnv = { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" };
+
+  test("--help after delete deletes nothing", () => {
+    const s = setup();
+    expect(cli(s, ["send", "lead", "--kind", "request", "--seq", "1", "--body", "Hi."]).code).toBe(0);
+    const r = cli(s, ["delete", "lead", "--help"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("peers delete");
+    expect(cli(s, ["chats"]).out).toContain("lead");
+  });
+
+  test("--help after open consumes no unread", () => {
+    const s = setup();
+    expect(cli(s, ["send", "me", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "w9:p1" }).code).toBe(0);
+    const r = cli(s, ["open", "lead", "--help"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("peers open");
+    expect(cli(s, ["chats"]).out).toContain("1 unread message in 1 chat");
+  });
+
+  test("--help after send sends nothing", () => {
+    const s = setup();
+    const r = cli(s, ["send", "lead", "--help", "--kind", "request", "--seq", "1", "--body", "Hi."]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("peers send");
+    expect(prompts(s)).toBe("");
+    const inbox = cli(s, ["chats"], { PEERS_SELF: "lead", HERDR_PANE_ID: "" });
+    expect(inbox.out).toContain("0 chats");
+  });
+
+  test("-h and a global --squad print help without running", () => {
+    const s = setup();
+    const h = cli(s, ["open", "-h"]);
+    expect(h.code).toBe(0);
+    expect(h.out).toContain("peers open");
+    const other = path.join(s.tmp, "elsewhere");
+    fs.mkdirSync(other, { recursive: true });
+    const g = cli(s, ["--squad", s.squad, "open", "--help"], { PEERS_CWD: other });
+    expect(g.code).toBe(0);
+    expect(g.out).toContain("peers open");
+    const eq = cli(s, [`--squad=${s.squad}`, "open"], { PEERS_CWD: other });
+    expect(eq.code).toBe(2);
+    expect(eq.err).toContain("open needs exactly one <TARGET>");
+    expect(eq.err).not.toContain("unknown command");
+    expect(cli(s, ["--help"]).out).toContain("1  other errors");
+  });
+
+  test("started:false is never reported as confirmed", () => {
+    const s = setup();
+    hcOnly(s, [T9, T2MUSE]);
+    hcSendStub(s, '{"started":false,"status":"ok","turn":0}');
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], hcEnv);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("notified via hc send to t2 (message not started, do not resend; it is stored)");
+    const inbox = cli(s, ["chats"], { PEERS_SELF: "t2", HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(inbox.out).toContain("1 unread message");
+  });
+
+  test("a shell running vim is not an agent", () => {
+    const s = setup();
+    hcOnly(s, [T9, { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" }]);
+    hcSendStub(s, '{"started":true,"status":"ok","turn":1}', `printf '%s\\n' '{"foreground":{"name":"/usr/bin/vim"}}'`);
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], hcEnv);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
+  });
+
+  test("an unknown kind is treated like a shell", () => {
+    const s = setup();
+    hcOnly(s, [T9, { address: "t2", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" }]);
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], hcEnv);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
+    const list = cli(s, ["list"], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(list.out).toContain("t2  kind=shell");
+    expect(list.out).toContain("t9  kind=muse");
+  });
+
+  test("peers list labels shell terminals as shell", () => {
+    const s = setup();
+    hcOnly(s, [T9, { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" }]);
+    const list = cli(s, ["list"], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(list.code).toBe(0);
+    expect(list.out).toContain("t2  kind=shell");
+    expect(list.out).toContain("t9  kind=muse");
+  });
+
+  test("a mistyped target stores the message with an UNKNOWN hint", () => {
+    const s = setup();
+    const r = cli(s, ["send", "leed", "--kind", "request", "--seq", "1", "--body", "Hi."]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("UNKNOWN: leed is no known member, tab or terminal");
+    expect(r.out).toContain("Did you mean: lead?");
+    expect(r.out).toContain("queued, not delivered yet");
+    const inbox = cli(s, ["chats"], { PEERS_SELF: "leed", HERDR_PANE_ID: "" });
+    expect(inbox.out).toContain("1 unread message");
+  });
+
+  test("contacts groups spellings under the canonical key", () => {
+    const s = setup();
+    expect(cli(s, ["whoami"], { PEERS_SELF: "Lena (lead)", HERDR_PANE_ID: "", PEERS_ROLE: "lead" }).code).toBe(0);
+    const contacts = cli(s, ["contacts"], { PEERS_SELF: "observer", HERDR_PANE_ID: "" });
+    expect(contacts.code).toBe(0);
+    expect(contacts.out).toContain("lead  status=");
+    expect(contacts.out).not.toContain("Lena (lead)");
+    expect(contacts.out.split("\n").filter((l) => l.includes("status="))).toHaveLength(1);
+    const prevCache = process.env.PEERS_CACHE;
+    process.env.PEERS_CACHE = path.join(s.tmp, "cache");
+    const db = Store.open(s.squad);
+    try {
+      expect(db.profile("lead")).not.toBeNull();
+      expect(db.profile("Lena (lead)")).toBeNull();
+    } finally {
+      db.close();
+      if (prevCache === undefined) delete process.env.PEERS_CACHE;
+      else process.env.PEERS_CACHE = prevCache;
+    }
+  });
+
+  test("the session's own registration refreshes seen", () => {
+    const s = setup();
+    const prevCache = process.env.PEERS_CACHE;
+    process.env.PEERS_CACHE = path.join(s.tmp, "cache");
+    const db = Store.open(s.squad);
+    try {
+      db.upsertProfile({ address: "me", runtime: "muse", name: null, role: null, cwd: s.squad, updated_at: 1 }, false);
+    } finally {
+      db.close();
+    }
+    expect(cli(s, ["whoami"]).code).toBe(0);
+    const check = Store.open(s.squad);
+    try {
+      expect(check.profile("me")!.updated_at).toBeGreaterThan(1);
+    } finally {
+      check.close();
+      if (prevCache === undefined) delete process.env.PEERS_CACHE;
+      else process.env.PEERS_CACHE = prevCache;
+    }
+  });
+
+  test("an empty --seq is refused", () => {
+    const s = setup();
+    const r = cli(s, ["send", "lead", "--kind", "request", "--seq=", "--body", "Hi."]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain(`bad seq ""`);
+  });
+
+  test("a piped body on stdin still sends", () => {
+    const s = setup();
+    const script = `printf '%s' "Piped body." | bun "${MAIN}" send lead --kind notice --seq 1`;
+    const p = Bun.spawnSync(["bash", "-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${s.bin}:${process.env.PATH}`,
+        PEERS_CACHE: path.join(s.tmp, "cache"),
+        HOME: path.join(s.tmp, "home"),
+        HERDR_PANE_ID: "w9:p9",
+        HC_TERMINAL_ID: "",
+        PEERS_CWD: s.squad,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = p.stdout.toString().trim();
+    expect(p.exitCode).toBe(0);
+    expect(out).toContain("SENT lead: stored in its inbox (1 unread message)");
+  });
+
+  test("an open stdin with no data does not block", async () => {
+    const s = setup();
+    const proc = Bun.spawn(["bun", MAIN, "send", "lead", "--kind", "notice", "--seq", "1"], {
+      env: {
+        ...process.env,
+        PATH: `${s.bin}:${process.env.PATH}`,
+        PEERS_CACHE: path.join(s.tmp, "cache"),
+        HOME: path.join(s.tmp, "home"),
+        HERDR_PANE_ID: "w9:p9",
+        HC_TERMINAL_ID: "",
+        PEERS_CWD: s.squad,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "pipe",
+    });
+    try {
+      const winner = await Promise.race([
+        proc.exited.then(() => "exited" as const),
+        Bun.sleep(8000).then(() => "waiting" as const),
+      ]);
+      expect(winner).toBe("exited");
+      expect(proc.exitCode).toBe(2);
+      expect(await new Response(proc.stderr).text()).toContain("empty message body");
+    } finally {
+      proc.kill();
+    }
+  });
+
+  test("whoami honours --squad", () => {
+    const s = setup();
+    fs.writeFileSync(s.squad + "/roster.json", JSON.stringify({ squad: "demo", members: [{ name: "lead", display_name: "Lena" }] }));
+    const other = path.join(s.tmp, "elsewhere");
+    fs.mkdirSync(other, { recursive: true });
+    const env = { PEERS_SELF: "Lena", HERDR_PANE_ID: "", HC_TERMINAL_ID: "", PEERS_CWD: other };
+    const withSquad = cli(s, ["whoami", "--squad", s.squad], env);
+    expect(withSquad.code).toBe(0);
+    expect(withSquad.out).toBe("lead");
+    const without = cli(s, ["whoami"], env);
+    expect(without.code).toBe(0);
+    expect(without.out).toBe("Lena");
+    const missing = cli(s, ["whoami", "--squad", path.join(s.tmp, "nosuch")], env);
+    expect(missing.code).toBe(2);
+    expect(missing.err).toContain("no such directory");
+  });
+
+  test("list honours --squad", () => {
+    const s = setup();
+    fs.writeFileSync(s.squad + "/roster.json", JSON.stringify({ squad: "demo", members: [{ name: "lead", display_name: "Lena" }] }));
+    const other = path.join(s.tmp, "elsewhere");
+    fs.mkdirSync(other, { recursive: true });
+    const env = { PEERS_SELF: "Lena", HERDR_PANE_ID: "", HC_TERMINAL_ID: "", PEERS_CWD: other };
+    const withSquad = cli(s, ["list", "--squad", s.squad], env);
+    expect(withSquad.code).toBe(0);
+    expect(withSquad.out).not.toContain("lead  kind=muse");
+    const without = cli(s, ["list"], env);
+    expect(without.code).toBe(0);
+    expect(without.out).toContain("lead  kind=muse");
+    const missing = cli(s, ["list", "--squad", path.join(s.tmp, "nosuch")], env);
+    expect(missing.code).toBe(2);
+    expect(missing.err).toContain("no such directory");
+  });
 });

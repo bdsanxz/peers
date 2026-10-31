@@ -7,6 +7,12 @@ let args = process.argv.slice(2);
 if (args[0] === "--squad" && args.length >= 3) {
   const [, dir, cmd, ...rest] = args;
   args = [cmd!, ...rest, "--squad", dir!];
+} else if (args[0]?.startsWith("--squad=") && args.length >= 2) {
+  const dir = args[0]!.slice("--squad=".length);
+  if (dir !== "") {
+    const [, cmd, ...rest] = args;
+    args = [cmd!, ...rest, "--squad", dir];
+  }
 }
 const [cmd, ...rest] = args;
 if (cmd === "--version" || cmd === "-V" || cmd === "version") {
@@ -19,7 +25,11 @@ if (!cmd || cmd === "--help" || cmd === "-h" || cmd === "help") {
 }
 const label = cmd;
 try {
-  if (rest.includes("--help") && rest.length === 1) {
+  // --help or -h anywhere before `--` prints the command's help and runs
+  // nothing: asking for help never deletes a chat, consumes unread, or sends.
+  const dash = rest.indexOf("--");
+  const before = dash === -1 ? rest : rest.slice(0, dash);
+  if (before.includes("--help") || before.includes("-h")) {
     const text = HELP[cmd];
     if (!text) throw new UsageError(`unknown command "${cmd}"`);
     console.log(text);
