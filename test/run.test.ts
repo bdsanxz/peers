@@ -1677,3 +1677,57 @@ describe("peers 0.3.2 qoder behind a shell (ISSUES row 27)", () => {
     expect(byAddr.get("t4")).toBe("shell");
   });
 });
+
+describe("peers 0.3.3 send body position and contacts follow-up (ISSUES rows 28-29)", () => {
+  test("a body after the address names --body and the fixed command (row 28)", () => {
+    const s = setup();
+    const r = cli(s, ["send", "lead", "Review api.", "--kind", "request", "--seq", "1", "--body", "Hi."]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("got extra text");
+    expect(r.err).toContain("--body");
+    expect(r.err).toContain('peers send lead --kind notice --seq 1 --body "text"');
+    expect(r.err).toContain("--seq");
+    expect(prompts(s)).toBe("");
+  });
+
+  test("a send with no target still names <TARGET> (row 28)", () => {
+    const s = setup();
+    const r = cli(s, ["send", "--kind", "request", "--seq", "1", "--body", "Hi."]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("send needs exactly one <TARGET>");
+  });
+
+  test("a send without --kind still names the missing flag (row 28)", () => {
+    const s = setup();
+    const r = cli(s, ["send", "lead", "--seq", "1", "--body", "Hi."]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("missing --kind");
+  });
+
+  test("contacts shows live the peer send follows by member directory (row 29)", () => {
+    const s = setup();
+    fs.writeFileSync(s.squad + "/roster.json", JSON.stringify({ squad: "demo", members: [{ name: "qa" }] }));
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(
+      s.tmp + "/hc.json",
+      JSON.stringify({
+        terminals: [
+          { address: "t24", agent: "muse", cwd: path.join(s.squad, "qa"), state: "live", status: "working", where: "SWE / 2" },
+        ],
+      }),
+    );
+    const me = { HERDR_PANE_ID: "", HC_TERMINAL_ID: "", PEERS_SELF: "me", PEERS_CWD: s.squad };
+    // The member runs on t24 under its member directory: send follows it,
+    // although no live address, pane or tab spells "qa".
+    const sent = cli(s, ["send", "qa", "--kind", "notice", "--seq", "1", "--body", "Hi qa."], me);
+    expect(sent.code).toBe(0);
+    expect(sent.out).toContain("notified via hcx send to t24");
+    const contacts = cli(s, ["contacts"], me);
+    expect(contacts.code).toBe(0);
+    expect(contacts.out).toContain("qa  status=live");
+    const j = cli(s, ["contacts", "--json"], me);
+    expect(j.code).toBe(0);
+    const doc = JSON.parse(j.out) as { contacts: { address: string; status: string }[] };
+    expect(doc.contacts.find((c) => c.address === "qa")!.status).toBe("live");
+  });
+});

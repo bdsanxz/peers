@@ -452,6 +452,8 @@ Notification, one fire-and-forget turn for every peer:
 
 Notes:
   - After it, end your turn: never sleep, poll or re-open the chat to wait for the answer.
+  - <TARGET> takes exactly one address: extra words after it are refused,
+    so the message text always goes in --body TEXT or on stdin.
   - <TARGET> is any spelling of the peer: its member name, tab name
     (quote it when it holds spaces, as in \`peers send "Lena (lead)"\`),
     terminal or pane id. The message is stored under the peer's
@@ -484,7 +486,8 @@ Output:
   first within each
 
 Status:
-  live      The member runs now in herdr.
+  live      The member runs now in herdr: on a live spelling, or on the
+            followed live terminal send notifies (same resolution as send).
   offline   It does not run, and no other session holds its role. A message waits until it runs.
   replaced  It does not run, and another session of the same role is live or was seen after it,
             such as a member restarted after hitting a limit. Message the session after \`by=\`
@@ -841,19 +844,52 @@ function statuses(profiles: Profile[], live: boolean[]): Status[] {
   });
 }
 
+/** The live terminal a peer runs on now: the same terminal `send` notifies.
+ * The unique in-squad live terminal matching any spelling of the peer wins;
+ * else the unique live terminal that runs the member now (by recorded role
+ * or member directory, the `send` follow-up); else null. Several matching
+ * terminals stay null, like `send`'s ambiguous queue: no guess is made. */
+function liveTerminalFor(
+  root: string,
+  peerKey: string,
+  peerAliases: string[],
+  agents: HerdrAgent[],
+  profiles: Profile[],
+): string | null {
+  const low = lowerSet(peerAliases);
+  const inScope = agents.filter(
+    (a) =>
+      (low.has(a.address.toLowerCase()) || low.has(a.pane.toLowerCase())) &&
+      !isOtherSquadTerminal(a, root),
+  );
+  const preferred = inScope.filter((a) => isMemberDir(a, root, peerKey));
+  const ranked = preferred.length > 0 ? preferred : inScope;
+  if (ranked.length === 1) return ranked[0]!.address;
+  if (ranked.length > 1) return null;
+  const follow = followLiveTarget(root, peerKey, agents, profiles);
+  return follow.address === "" ? null : follow.address;
+}
+
 /** Whether each profiled peer runs now in herdr. A peer is live when any
  * spelling of it — tab name, member name, terminal — is live, resolved
- * through the same canonical key as chats. `me` is live by definition. */
+ * through the same canonical key as chats, or when `send` would still reach
+ * it on its follow-up terminal (by recorded role or member directory).
+ * `me` is live by definition. */
 function liveness(store: Store, meAliases: Set<string>, agents: HerdrAgent[], cctx: CanonCtx): Map<string, boolean> {
   const live = new Set<string>();
   for (const a of agents) {
     live.add(a.address.toLowerCase());
     live.add(a.pane.toLowerCase());
   }
+  const profiles = store.contacts("");
   const out = new Map<string, boolean>();
-  for (const p of store.contacts("")) {
-    const pal = aliases(p.address, cctx).map((a) => a.toLowerCase());
-    out.set(p.address, pal.some((a) => meAliases.has(a) || live.has(a)));
+  for (const p of profiles) {
+    const pal = aliases(p.address, cctx);
+    out.set(
+      p.address,
+      pal.some((a) => meAliases.has(a.toLowerCase()) || live.has(a.toLowerCase())) ||
+        liveTerminalFor(store.root, primary(p.address, cctx), pal, agents, profiles) !== null,
+    );
   }
   return out;
 }
@@ -863,17 +899,18 @@ async function cmdSend(argv: string[]): Promise<number> {
   unknownFlags(p, ["kind", "seq", "body", "reply-to", "role", "name", "squad"]);
   const json = wantsJson(p);
   const target = p.positionals[0];
-  if (!target || p.positionals.length !== 1) {
+  if (!target) {
     throw new UsageError(
       `send needs exactly one <TARGET>, a herdr member name such as "lead" (see \`peers list\`)`,
     );
   }
-  const stray = p.positionals.slice(1);
-  if (stray.length > 0) {
-    const got = oneLine(stray.join(" "));
+  if (p.positionals.length !== 1) {
+    const got = oneLine(p.positionals.slice(1).join(" "));
+    const shown = got.length > 40 ? got.slice(0, 40) : got;
     throw new UsageError(
-      `unexpected text after the address (${JSON.stringify(got.length > 40 ? got.slice(0, 40) : got)}): ` +
-        `the body goes in --body TEXT or on stdin, as in \`peers send ${target} --kind <kind> --seq <n> --body "<text>"\``,
+      `send takes no body after the address: got extra text ${JSON.stringify(shown)}; ` +
+        `pass the message in --body TEXT or on stdin, as in \`peers send ${target} --kind notice --seq 1 --body "text"\` ` +
+        `(--kind is required: one of ${KINDS.join(", ")}, and --seq is required)`,
     );
   }
   checkAddressTarget(target);
@@ -1265,9 +1302,16 @@ function cmdContacts(argv: string[]): number {
         updated_at: Math.max(...ps.map((x) => x.updated_at)),
       };
     });
-    const flags = reps.map((pr) =>
-      aliases(pr.address, cctx).some((a) => meAliases.has(a.toLowerCase()) || liveSet.has(a.toLowerCase())),
-    );
+    // Live means `send` would reach the peer: a live spelling, else the
+    // follow-up terminal that runs the member now (by recorded role or
+    // member directory), so contacts never reports offline a peer send
+    // delivers to.
+    const allProfiles = c.store.contacts("");
+    const flags = reps.map((pr) => {
+      const pal = aliases(pr.address, cctx);
+      if (pal.some((a) => meAliases.has(a.toLowerCase()) || liveSet.has(a.toLowerCase()))) return true;
+      return liveTerminalFor(c.store.root, pr.address, pal, agents, allProfiles) !== null;
+    });
     const st = statuses(reps, flags);
     const rank = (s: Status): number => (typeof s === "string" ? (s === "live" ? 0 : 1) : 2);
     const rows = reps

@@ -71,8 +71,8 @@ Agents use `peers` through the `peers` agent skill, which tells them when to mes
 | --- | --- |
 | `peers whoami` | Prints this session's canonical address, such as `lead` (whitespace-free, feeds back into every command). |
 | `peers list` | Lists live herdr agents. Plain shells list as `kind=shell` and are never notified. Qoder and opencode tabs behind a login shell list by their agent kind (`qoder`, `opencode`). |
-| `peers send <member> --kind <kind> --seq <n> --body TEXT` | Stores a message and notifies the peer with one `herdr agent prompt` (or `hcx send` over herdr-core, which needs hcx 0.3.0). The body may come on stdin instead of `--body`. |
-| `peers contacts` | Lists every peer profile in the squad's database, with its status: `live`, `offline`, or `replaced` by the session that holds its role now. |
+| `peers send <member> --kind <kind> --seq <n> --body TEXT` | Stores a message and notifies the peer with one `herdr agent prompt` (or `hcx send` over herdr-core, which needs hcx 0.3.0). The body may come on stdin instead of `--body`, never as a bare second word: `peers send lead hello` is a usage error. `--kind` and `--seq` are always required. |
+| `peers contacts` | Lists every peer profile in the squad's database, with its status: `live`, `offline`, or `replaced` by the session that holds its role now. `live` uses the same terminal resolution as `send`, including the followed terminal, so a peer `send` delivers to is never shown `offline`. |
 | `peers chats` (or `peers inbox`) | Lists your chats with their unread counts, and whether the peer has read your last message. |
 | `peers open <member> [--page N]` | Prints one page of a chat: 20 messages, with page 1 the newest. It marks the messages it prints as read. Any spelling opens the same merged chat; quote tab names with spaces. |
 | `peers delete <member>` | Hides a chat from your own view. The other side keeps it. |
