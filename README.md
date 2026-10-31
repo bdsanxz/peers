@@ -79,7 +79,7 @@ Agents use `peers` through the `peers` agent skill, which tells them when to mes
 
 Every command has `--help` with its details, output and exit codes. Exit code 0 means success, 1 other errors, and 2 a usage error (or a stored message whose notification failed); the error line says why. Every command also takes `--squad <dir>` to use that squad's database, and `--json` for one JSON document on stdout with no prose.
 
-With `--json` the output is one object (or one object with an array) and errors print `{"error":{"kind","message","hint"}}` on stdout with the same exit codes. Timestamps are ISO strings. Shapes:
+Output is text by default; JSON is printed only with `--json`, for scripts and mapping. With `--json` the output is one object (or one object with an array) and errors print `{"error":{"kind","message","hint"}}` on stdout with the same exit codes. Timestamps are ISO strings. Shapes:
 
 - `whoami --json`: `{"address","squad_root"}`
 - `list --json`: `{"agents":[{"address","pane","kind","status","cwd","workspace"}]}`
