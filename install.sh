@@ -26,6 +26,8 @@ Usage: install.sh [--version vX.Y.Z] [--dir DIR] [--from-source]
   --from-source     Bundle the release from its source with Bun instead of downloading it.
 
 peers runs with Bun (https://bun.sh), which must be on PATH.
+Notifications over herdr-core need hcx 0.3.0, which must be on PATH:
+curl -fsSL https://raw.githubusercontent.com/bdsanxz/hcx/main/install.sh | sh
 A private repository needs a token with read access: set GITHUB_TOKEN, or sign in
 with the GitHub CLI (gh auth login), whose token is then used.
 EOF

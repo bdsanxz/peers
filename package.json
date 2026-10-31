@@ -1,9 +1,9 @@
 {
   "name": "peers",
-  "version": "0.1.11",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Inbox messenger between agent sessions in one herdr workspace: store a message, notify the peer with one herdr agent prompt turn (hc send when the old server is stopped).",
+  "description": "Inbox messenger between agent sessions in one herdr workspace: store a message, notify the peer with one herdr agent prompt turn (hcx send when the old server is stopped; hcx 0.3.0 is required).",
   "license": "GPL-3.0-or-later",
   "scripts": {
     "build": "bun run build.ts",

@@ -19,7 +19,7 @@ const AGENTS = {
   },
 };
 
-function setup(): { tmp: string; bin: string; prompts: string; hcPrompts: string; squad: string } {
+function setup(): { tmp: string; bin: string; prompts: string; hcPrompts: string; hcxPrompts: string; hcxCalls: string; squad: string } {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "peers-test-"));
   const bin = path.join(tmp, "bin");
   fs.mkdirSync(bin, { recursive: true });
@@ -27,6 +27,15 @@ function setup(): { tmp: string; bin: string; prompts: string; hcPrompts: string
   fs.mkdirSync(squad, { recursive: true });
   fs.writeFileSync(path.join(tmp, "agents.json"), JSON.stringify(AGENTS));
   fs.writeFileSync(path.join(tmp, "hc.json"), JSON.stringify({ terminals: [] }));
+  fs.writeFileSync(
+    path.join(tmp, "hcx-version.json"),
+    JSON.stringify({ hcx: "0.3.0", hc: "0.1.15", contract: 1, capabilities: ["no-footer", "agent-only", "json-delivery"] }),
+  );
+  fs.writeFileSync(
+    path.join(tmp, "hcx-send.json"),
+    JSON.stringify({ status: "idle", turn: 1, started: true, delivered: true, route: "hcx-raw", agent: "muse" }),
+  );
+  fs.writeFileSync(path.join(tmp, "hcx-send.exit"), "0");
   const stub = `#!/bin/bash
 if [ "$1 $2" = "agent list" ]; then cat "${tmp}/agents.json"; exit 0; fi
 if [ "$1 $2" = "agent prompt" ]; then printf '%s\\n' "$*" >>"${tmp}/prompts.log"; [ "$3" = "flaky" ] && { echo "no such agent: flaky" >&2; exit 1; }; grep -q server_not_running "${tmp}/agents.json" 2>/dev/null && { echo "no herdr server is running" >&2; exit 1; }; exit 0; fi
@@ -37,14 +46,47 @@ echo "unexpected herdr call: $*" >&2; exit 9
   const hcStub = `#!/bin/bash
 if [ "$1" = "ls" ]; then cat "${tmp}/hc.json"; exit 0; fi
 if [ "$1" = "get" ]; then printf '%s\\n' "$2" >>"${tmp}/hc-get.log"; printf '%s\\n' '{"foreground":{"name":"zsh"}}'; exit 0; fi
-if [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${tmp}/hc-prompts.log"; printf '%s\\n' "\${HC_TERMINAL_ID-unset}" >>"${tmp}/hc-env.log"; [ -n "$HC_FAIL_PLAIN" ] && [ -z "\${HC_TERMINAL_ID+x}" ] && { echo "plain send refused" >&2; exit 1; }; [ "$2" = "flaky" ] && { echo "no such terminal: flaky" >&2; exit 1; }; [ "$2" = "ghost" ] && { echo "no such terminal: ghost" >&2; exit 1; }; printf '%s\\n' '{"started":true,"status":"ok","turn":1}'; exit 0; fi
+if [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${tmp}/hc-prompts.log"; printf '%s\\n' '{"started":true,"status":"ok","turn":1}'; exit 0; fi
 echo "unexpected hc call: $*" >&2; exit 9
 `;
   fs.writeFileSync(path.join(bin, "hc"), hcStub);
   fs.chmodSync(path.join(bin, "hc"), 0o755);
+  const hcxStub = `#!/bin/bash
+printf 'CALL:%s\\n' "$*" >>"${tmp}/hcx-calls.log"
+if [ "$1" = "--version" ]; then cat "${tmp}/hcx-version.json"; exit 0; fi
+if [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${tmp}/hcx-prompts.log"; cat "${tmp}/hcx-send.json"; exit $(cat "${tmp}/hcx-send.exit"); fi
+echo "unexpected hcx call: $*" >&2; exit 9
+`;
+  fs.writeFileSync(path.join(bin, "hcx"), hcxStub);
+  fs.chmodSync(path.join(bin, "hcx"), 0o755);
   fs.writeFileSync(path.join(bin, "herdr-app"), `#!/bin/bash\nif [ "$1" = "ls" ]; then printf '%s\\n' '{"spaces":[{"tabs":[{"name":"Zytra","terminals":[{"terminal":"t9","app":true}]}]}]}'; exit 0; fi\necho "unexpected herdr-app call: $*" >&2; exit 9\n`);
   fs.chmodSync(path.join(bin, "herdr-app"), 0o755);
-  return { tmp, bin, prompts: path.join(tmp, "prompts.log"), hcPrompts: path.join(tmp, "hc-prompts.log"), squad };
+  return {
+    tmp,
+    bin,
+    prompts: path.join(tmp, "prompts.log"),
+    hcPrompts: path.join(tmp, "hc-prompts.log"),
+    hcxPrompts: path.join(tmp, "hcx-prompts.log"),
+    hcxCalls: path.join(tmp, "hcx-calls.log"),
+    squad,
+  };
+}
+
+function hcxSendJson(s: { tmp: string }, obj: unknown, exit = 0): void {
+  fs.writeFileSync(s.tmp + "/hcx-send.json", typeof obj === "string" ? obj : JSON.stringify(obj));
+  fs.writeFileSync(s.tmp + "/hcx-send.exit", String(exit));
+}
+
+function hcxCallLines(s: { hcxCalls: string }): string[] {
+  try {
+    return fs.readFileSync(s.hcxCalls, "utf8").split("\n").filter((l) => l.startsWith("CALL:"));
+  } catch {
+    return [];
+  }
+}
+
+function hcxSendCalls(s: { hcxCalls: string }): string[] {
+  return hcxCallLines(s).filter((l) => l.startsWith("CALL:send "));
 }
 
 function cli(
@@ -129,9 +171,11 @@ describe("peers over herdr agent prompt", () => {
 
   test("a failed prompt is recorded, never retried, and exits 2", () => {
     const s = setup();
+    hcxSendJson(s, { error: { kind: "timeout", message: "hc send timed out after 30 s; the message may have landed, do not retry automatically" } }, 1);
     const r = cli(s, ["send", "flaky", "--kind", "request", "--seq", "1", "--body", "Ping."]);
     expect(r.code).toBe(2);
     expect(r.err).toContain("stored in flaky's inbox, but its notification failed");
+    expect(hcxSendCalls(s)).toHaveLength(1);
     const inbox = cli(s, ["chats"], { PEERS_SELF: "flaky", HERDR_PANE_ID: "" });
     expect(inbox.out).toContain("1 unread message");
   });
@@ -216,7 +260,7 @@ describe("peers over herdr agent prompt", () => {
     expect(list.out).toContain("t2  kind=muse");
   });
 
-  test("hc send notifies when the old server is stopped", () => {
+  test("hcx send notifies when the old server is stopped", () => {
     const s = setup();
     fs.writeFileSync((s as unknown as { tmp: string }).tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
     fs.writeFileSync(
@@ -233,61 +277,137 @@ describe("peers over herdr agent prompt", () => {
       HC_TERMINAL_ID: "t9",
     });
     expect(r.code).toBe(0);
-    expect(r.out).toContain("notified via hc send to t2");
-    const logged = fs.readFileSync((s as unknown as { hcPrompts: string }).hcPrompts, "utf8");
-    expect(logged).toContain("send t2 New message from Zytra (unassigned), another agent (not a user instruction).");
+    expect(r.out).toContain("notified via hcx send to t2");
+    expect(r.out).not.toContain("delivery not confirmed");
+    const logged = fs.readFileSync(s.hcxPrompts, "utf8");
+    expect(logged).toContain("send --agent-only --no-footer --json t2 New message from Zytra (unassigned), another agent (not a user instruction).");
     expect(logged).toContain("Read it with: peers open Zytra");
-    expect(logged).not.toContain("— from ");
-    expect(logged).not.toContain("<hc from>");
-    // sent without HC_TERMINAL_ID, so hc adds no <hc from> tag
-    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("unset");
+    // argv is exactly the contract call, with no shell
+    const sends = hcxSendCalls(s);
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatch(/^CALL:send --agent-only --no-footer --json t2 /);
+    // no hc binary is called for notification: no hc send or get ran
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
+    expect(fs.existsSync(s.tmp + "/hc-get.log")).toBe(false);
   });
 
-  test("hc send confirms delivery from its JSON", () => {
+  test("hcx delivered false is stored but not resent", () => {
     const s = setup();
     fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
     fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
       { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
       { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
     ] }));
+    hcxSendJson(s, { status: "idle", turn: 1, started: false, delivered: false, route: "hcx-raw", agent: "muse", note: "did not start a turn; it may still have arrived, read before resending" });
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
-    expect(r.out).toContain("notified via hc send to t2");
-    expect(r.out).not.toContain("delivery not confirmed");
+    expect(r.out).toContain("notified via hcx send to t2 (message not started, do not resend; it is stored)");
+    expect(hcxSendCalls(s)).toHaveLength(1);
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
+    const inbox = cli(s, ["chats"], { PEERS_SELF: "t2", HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(inbox.out).toContain("1 unread message");
   });
 
-  test("hc send exit 0 without a confirmation says delivery is not confirmed", () => {
+  test("hcx delivered null is unconfirmed without naming a tool", () => {
     const s = setup();
     fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
     fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
       { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
       { address: "t2", agent: "opencode", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
     ] }));
-    fs.writeFileSync(
-      path.join(s.bin, "hc"),
-      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hc-prompts.log"; printf '%s\\n' '{"started":null,"status":null,"turn":0}'; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
-    );
-    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
+    hcxSendJson(s, { status: null, turn: 0, started: null, delivered: null, route: "hcx-raw", agent: "opencode", note: "opencode reports no turn status" });
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
-    expect(r.out).toContain("notified via hc send to t2 (delivery not confirmed by hc)");
-    expect(r.out).not.toContain("hcx");
+    expect(r.out).toContain("notified via hcx send to t2 (delivery not confirmed)");
+    expect(r.out).not.toContain("by hc");
+    expect(r.out).not.toContain("by hcx");
+    expect(hcxSendCalls(s)).toHaveLength(1);
   });
 
-  test("a failed hc send is reported and exits 2", () => {
+  test("a failed hcx send is reported and exits 2, never retried", () => {
     const s = setup();
     fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
     fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
       { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
-      { address: "flaky", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+      { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
     ] }));
-    const r = cli(s, ["send", "flaky", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    hcxSendJson(s, { error: { kind: "timeout", message: "hc send timed out after 30 s; the message may have landed, do not retry automatically", hint: "read before resending" } }, 1);
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(2);
-    expect(r.err).toContain("stored in flaky's inbox, but its notification failed");
-    expect(r.err).toContain("hc send to flaky failed: no such terminal: flaky");
+    expect(r.err).toContain("stored in t2's inbox, but its notification failed");
+    expect(r.err).toContain("hcx send to t2 failed");
+    expect(hcxSendCalls(s)).toHaveLength(1);
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
+    const inbox = cli(s, ["chats"], { PEERS_SELF: "t2", HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(inbox.out).toContain("1 unread message");
   });
 
-  test("hc notification uses the stated name over the tab name", () => {
+  test("hcx plain_shell refusal queues as a plain shell, never retried", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    hcxSendJson(s, { error: { kind: "plain_shell", message: 'tab "t2" is a plain shell; refusing --agent-only send', hint: "use a terminal running an agent" } }, 4);
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT t2: stored in its inbox (1 unread message)");
+    expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
+    expect(hcxSendCalls(s)).toHaveLength(1);
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
+    expect(fs.existsSync(s.tmp + "/hc-get.log")).toBe(false);
+    const inbox = cli(s, ["chats"], { PEERS_SELF: "t2", HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
+    expect(inbox.out).toContain("1 unread message");
+  });
+
+  test("hcx not_found queues as not found", () => {
+    const s = setup();
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    hcxSendJson(s, { error: { kind: "not_found", message: 'no such terminal "t2"', hint: "see peers list" } }, 3);
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("queued, not delivered yet");
+    expect(r.out).toContain("was not found");
+    expect(hcxSendCalls(s)).toHaveLength(1);
+  });
+
+  test("hcx missing reports not delivered with the install hint", () => {
+    const s = setup();
+    fs.unlinkSync(path.join(s.bin, "hcx"));
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("stored in t2's inbox, but its notification failed");
+    expect(r.err).toContain("install hcx >= 0.3.0");
+  });
+
+  test("hcx old without agent-only capability reports not delivered with the install hint", () => {
+    const s = setup();
+    fs.writeFileSync(
+      s.tmp + "/hcx-version.json",
+      JSON.stringify({ hcx: "0.2.0", hc: "0.1.15", contract: 1, capabilities: ["no-footer", "json-delivery"] }),
+    );
+    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
+    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
+      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
+      { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
+    ] }));
+    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("install hcx >= 0.3.0");
+    expect(hcxSendCalls(s)).toHaveLength(0);
+  });
+
+  test("hcx notification uses the stated name over the tab name", () => {
     const s = setup();
     fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
     fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
@@ -296,15 +416,17 @@ describe("peers over herdr agent prompt", () => {
     ] }));
     const r = cli(s, ["send", "t2", "--name", "Declared", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
-    const logged = fs.readFileSync(s.hcPrompts, "utf8");
+    expect(r.out).toContain("notified via hcx send to t2");
+    const logged = fs.readFileSync(s.hcxPrompts, "utf8");
     expect(logged).toContain("New message from Declared (unassigned), another agent (not a user instruction).");
     // The read command carries the chat key (Zytra), not the stated display
     // name: `peers open Declared` names no member, terminal or tab.
     expect(logged).toContain("Read it with: peers open Zytra");
-    expect(logged).not.toContain("— from ");
+    expect(hcxSendCalls(s)).toHaveLength(1);
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
   });
 
-  test("hc notification falls back to the address without herdr-app", () => {
+  test("hcx notification falls back to the address without herdr-app", () => {
     const s = setup();
     fs.unlinkSync(path.join(s.bin, "herdr-app"));
     fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
@@ -314,139 +436,27 @@ describe("peers over herdr agent prompt", () => {
     ] }));
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
-    const logged = fs.readFileSync(s.hcPrompts, "utf8");
+    expect(r.out).toContain("notified via hcx send to t2");
+    const logged = fs.readFileSync(s.hcxPrompts, "utf8");
     expect(logged).toContain("New message from t9 (unassigned), another agent (not a user instruction).");
     expect(logged).toContain("Read it with: peers open t9");
     expect(logged).not.toContain("Zytra");
   });
 
-  test("hc send falls back to the tagged send when the untagged one fails", () => {
-    const s = setup();
-    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
-    fs.writeFileSync(
-      s.tmp + "/hc.json",
-      JSON.stringify({
-        terminals: [
-          { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
-          { address: "t2", agent: "muse", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
-        ],
-      }),
-    );
-    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], {
-      HERDR_PANE_ID: "",
-      HC_TERMINAL_ID: "t9",
-      HC_FAIL_PLAIN: "1",
-    });
-    expect(r.code).toBe(0);
-    // The untagged send is tried first, then the tagged send after it fails.
-    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim().split("\n")).toEqual(["unset", "t9"]);
-    const logged = fs.readFileSync(s.hcPrompts, "utf8").trim().split("\n");
-    expect(logged).toHaveLength(2);
-    expect(logged[0]).toContain("another agent (not a user instruction)");
-    expect(logged[0]).not.toContain("— from ");
-    expect(logged[1]).not.toContain("— from ");
-  });
-
-  test("a plain shell is never notified", () => {
-    const s = setup();
-    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
-    fs.writeFileSync(
-      s.tmp + "/hc.json",
-      JSON.stringify({
-        terminals: [
-          { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
-          { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", where: "SWE / 1" },
-        ],
-      }),
-    );
-    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
-    expect(r.code).toBe(0);
-    expect(r.out).toContain("SENT t2: stored in its inbox (1 unread message)");
-    expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
-    // hc get still runs to read the foreground, but no hc send is attempted.
-    expect(fs.readFileSync(s.tmp + "/hc-get.log", "utf8").trim()).toBe("t2");
-    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
-    // The message waits in the inbox.
-    const inbox = cli(s, ["chats"], { PEERS_SELF: "t2", HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
-    expect(inbox.out).toContain("1 unread message");
-  });
-
-  test("an opencode tab listed as a shell is notified untagged", () => {
+  test("a shell-looking tab is refused by hcx before sending, never typed into", () => {
     const s = setup();
     fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
     fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
       { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
       { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
     ] }));
-    // hc lists the tab as zsh, but its foreground program is opencode.
-    fs.writeFileSync(
-      path.join(s.bin, "hc"),
-      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "get" ]; then printf '%s\\n' "$2" >>"${s.tmp}/hc-get.log"; printf '%s\\n' '{"foreground":{"name":"opencode"}}'; exit 0; fi\nif [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hc-prompts.log"; printf '%s\\n' "\${HC_TERMINAL_ID-unset}" >>"${s.tmp}/hc-env.log"; printf '%s\\n' '{"started":true,"status":"ok","turn":1}'; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
-    );
-    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
+    hcxSendJson(s, { error: { kind: "plain_shell", message: 'tab "t2" is a plain shell; refusing --agent-only send' } }, 4);
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
     expect(r.code).toBe(0);
-    expect(r.out).toContain("notified via hc send to t2");
-    const logged = fs.readFileSync(s.hcPrompts, "utf8");
-    expect(logged).toContain("New message from Zytra (unassigned), another agent (not a user instruction).");
-    expect(logged).not.toContain("— from ");
-    // Untagged: hc gets no <hc from> tag.
-    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("unset");
-    // One lookup for the address, by its address form.
-    expect(fs.readFileSync(s.tmp + "/hc-get.log", "utf8").trim()).toBe("t2");
-  });
-
-  test("a claude-code tab keeps its kind despite a version-string foreground", () => {
-    const s = setup();
-    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
-    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
-      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
-      { address: "t2", agent: "claude-code", foreground: { name: "2.1.314" }, cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
-    ] }));
-    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
-    expect(r.code).toBe(0);
-    expect(r.out).toContain("notified via hc send to t2");
-    // A non-shell agent kind is used as-is, so the odd foreground name is never read.
+    expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
+    expect(hcxSendCalls(s)).toHaveLength(1);
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
     expect(fs.existsSync(s.tmp + "/hc-get.log")).toBe(false);
-    expect(fs.readFileSync(s.hcPrompts, "utf8")).toContain("another agent (not a user instruction)");
-    expect(fs.readFileSync(s.hcPrompts, "utf8")).not.toContain("— from ");
-    expect(fs.readFileSync(s.tmp + "/hc-env.log", "utf8").trim()).toBe("unset");
-  });
-
-  test("a failed hc get keeps the shell queued", () => {
-    const s = setup();
-    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
-    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
-      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
-      { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
-    ] }));
-    fs.writeFileSync(
-      path.join(s.bin, "hc"),
-      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "get" ]; then echo "no such terminal: $2" >&2; exit 1; fi\nif [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hc-prompts.log"; printf '%s\\n' "\${HC_TERMINAL_ID-unset}" >>"${s.tmp}/hc-env.log"; printf '%s\\n' '{"started":true,"status":"ok","turn":1}'; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
-    );
-    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
-    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
-    expect(r.code).toBe(0);
-    expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
-    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
-  });
-
-  test("unparseable hc get JSON keeps the shell queued", () => {
-    const s = setup();
-    fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
-    fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals: [
-      { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" },
-      { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" },
-    ] }));
-    fs.writeFileSync(
-      path.join(s.bin, "hc"),
-      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "get" ]; then printf '%s\\n' '{not json'; exit 0; fi\nif [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hc-prompts.log"; printf '%s\\n' "\${HC_TERMINAL_ID-unset}" >>"${s.tmp}/hc-env.log"; printf '%s\\n' '{"started":true,"status":"ok","turn":1}'; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
-    );
-    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
-    const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "t9" });
-    expect(r.code).toBe(0);
-    expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
-    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
   });
 
   test("a Herdr tab name is the address, stored under its canonical spelling", () => {
@@ -460,9 +470,9 @@ describe("peers over herdr agent prompt", () => {
     const r = cli(s, ["send", "zytra", "--kind", "request", "--seq", "1", "--body", "Hi tab."], fromT2);
     expect(r.code).toBe(0);
     expect(r.out).toContain("SENT Zytra: stored in its inbox (1 unread message)");
-    expect(r.out).toContain("notified via hc send to t9");
-    const logged = fs.readFileSync(s.hcPrompts, "utf8");
-    expect(logged).toContain("send t9 New message from t2 (unassigned), another agent (not a user instruction).");
+    expect(r.out).toContain("notified via hcx send to t9");
+    const logged = fs.readFileSync(s.hcxPrompts, "utf8");
+    expect(logged).toContain("send --agent-only --no-footer --json t9 New message from t2 (unassigned), another agent (not a user instruction).");
     expect(logged).toContain("Read it with: peers open t2");
     const open = cli(s, ["open", "ZYTRA"], fromT2);
     expect(open.code).toBe(0);
@@ -587,9 +597,9 @@ describe("peers over herdr agent prompt", () => {
     });
     expect(r.code).toBe(0);
     expect(r.out).toContain("demo-qa is not live, but t2 runs it now");
-    expect(r.out).toContain("notified via hc send to t2");
-    const logged = fs.readFileSync((s as unknown as { hcPrompts: string }).hcPrompts, "utf8");
-    expect(logged).toContain("send t2 New message from Zytra (unassigned), another agent (not a user instruction).");
+    expect(r.out).toContain("notified via hcx send to t2");
+    const logged = fs.readFileSync(s.hcxPrompts, "utf8");
+    expect(logged).toContain("send --agent-only --no-footer --json t2 New message from Zytra (unassigned), another agent (not a user instruction).");
   });
 
   test("ambiguous live terminals stay queued with a hint", () => {
@@ -662,8 +672,8 @@ describe("peers canonical addresses (0.1.5)", () => {
     const sent = cli(s, ["send", "planner", "--kind", "request", "--seq", "1", "--body", "Hi Tara."], fromLead);
     expect(sent.code).toBe(0);
     expect(sent.out).toContain("SENT planner: stored in its inbox (1 unread message)");
-    expect(sent.out).toContain("notified via hc send to t2");
-    const logged = fs.readFileSync(s.hcPrompts, "utf8");
+    expect(sent.out).toContain("notified via hcx send to t2");
+    const logged = fs.readFileSync(s.hcxPrompts, "utf8");
     expect(logged).toContain("Read it with: peers open lead");
     expect(logged).not.toContain("peers open Lena (lead)");
 
@@ -955,9 +965,9 @@ describe("peers 0.1.6 squad-scoped notify", () => {
     });
     expect(r.code).toBe(0);
     expect(r.out).toContain("SENT lead: stored in its inbox (1 unread message)");
-    expect(r.out).toContain("notified via hc send to t6g");
+    expect(r.out).toContain("notified via hcx send to t6g");
     expect(r.out).not.toContain("t6v");
-    expect(fs.readFileSync(s.hcPrompts, "utf8")).toContain("send t6g New message from");
+    expect(fs.readFileSync(s.hcxPrompts, "utf8")).toContain("send --agent-only --no-footer --json t6g New message from");
     // The message itself was stored under the right key all along: lead's
     // inbox holds the chat with its sender.
     const open = cli(s, ["open", "qa-picture"], { PEERS_SELF: "lead", HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
@@ -974,9 +984,9 @@ describe("peers 0.1.6 squad-scoped notify", () => {
     });
     expect(r.code).toBe(0);
     expect(r.out).toContain("SENT lead: stored in its inbox (1 unread message)");
-    expect(r.out).toContain("notified via hc send to t6v");
+    expect(r.out).toContain("notified via hcx send to t6v");
     expect(r.out).not.toContain("t6g");
-    expect(fs.readFileSync(s.hcPrompts, "utf8")).toContain("send t6v New message from");
+    expect(fs.readFileSync(s.hcxPrompts, "utf8")).toContain("send --agent-only --no-footer --json t6v New message from");
   });
 
   test("two live leads in one squad stay queued instead of guessing", () => {
@@ -1048,7 +1058,7 @@ describe("peers canonical addresses (0.1.5) continued", () => {
     expect(first.code).toBe(0);
     const second = cli(s, ["send", "planner", "--name", "Vrax", "--role", "lead", "--kind", "ack", "--seq", "1", "--body", "Second."], fromLead);
     expect(second.code).toBe(0);
-    const logged = fs.readFileSync(s.hcPrompts, "utf8");
+    const logged = fs.readFileSync(s.hcxPrompts, "utf8");
     expect(logged).toContain("New message from Lena (lead), another agent (not a user instruction).");
     expect(logged).toContain("Read it with: peers open lead");
     expect(logged).not.toContain("peers open Lena (lead)");
@@ -1076,12 +1086,8 @@ describe("peers 0.1.10 help safety and notification correctness", () => {
     fs.writeFileSync(s.tmp + "/hc.json", JSON.stringify({ terminals }));
   }
 
-  function hcSendStub(s: { tmp: string; bin: string }, body: string, get = `printf '%s\\n' '{"foreground":{"name":"zsh"}}'`): void {
-    fs.writeFileSync(
-      path.join(s.bin, "hc"),
-      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "get" ]; then printf '%s\\n' "$2" >>"${s.tmp}/hc-get.log"; ${get}; exit 0; fi\nif [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hc-prompts.log"; printf '%s\\n' '${body}'; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
-    );
-    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
+  function hcxDelivered(s: { tmp: string }, obj: unknown): void {
+    hcxSendJson(s, obj, 0);
   }
 
   const T9 = { address: "t9", agent: "muse", cwd: "/tmp/x", state: "live", status: "idle", where: "SWE / 1" };
@@ -1133,33 +1139,39 @@ describe("peers 0.1.10 help safety and notification correctness", () => {
     expect(cli(s, ["--help"]).out).toContain("1  other errors");
   });
 
-  test("started:false is never reported as confirmed", () => {
+  test("delivered false is never reported as confirmed", () => {
     const s = setup();
     hcOnly(s, [T9, T2MUSE]);
-    hcSendStub(s, '{"started":false,"status":"ok","turn":0}');
+    hcxDelivered(s, { status: "ok", turn: 0, started: false, delivered: false, route: "hcx-raw", agent: "muse", note: "did not start a turn; it may still have arrived, read before resending" });
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], hcEnv);
     expect(r.code).toBe(0);
-    expect(r.out).toContain("notified via hc send to t2 (message not started, do not resend; it is stored)");
+    expect(r.out).toContain("notified via hcx send to t2 (message not started, do not resend; it is stored)");
+    expect(hcxSendCalls(s)).toHaveLength(1);
+    expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
     const inbox = cli(s, ["chats"], { PEERS_SELF: "t2", HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
     expect(inbox.out).toContain("1 unread message");
   });
 
-  test("a shell running vim is not an agent", () => {
+  test("hcx refusal queues a shell tab without typing into it", () => {
     const s = setup();
     hcOnly(s, [T9, { address: "t2", agent: "zsh", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" }]);
-    hcSendStub(s, '{"started":true,"status":"ok","turn":1}', `printf '%s\\n' '{"foreground":{"name":"/usr/bin/vim"}}'`);
+    hcxSendJson(s, { error: { kind: "plain_shell", message: 'tab "t2" is a plain shell; refusing --agent-only send' } }, 4);
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], hcEnv);
     expect(r.code).toBe(0);
     expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
+    expect(hcxSendCalls(s)).toHaveLength(1);
     expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
+    expect(fs.existsSync(s.tmp + "/hc-get.log")).toBe(false);
   });
 
-  test("an unknown kind is treated like a shell", () => {
+  test("an unknown kind lists as a shell and hcx refusal queues it", () => {
     const s = setup();
     hcOnly(s, [T9, { address: "t2", cwd: "/tmp/x", state: "live", status: "working", where: "SWE / 1" }]);
+    hcxSendJson(s, { error: { kind: "plain_shell", message: 'tab "t2" is not a known agent; refusing --agent-only send' } }, 4);
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], hcEnv);
     expect(r.code).toBe(0);
     expect(r.out).toContain("queued, not delivered yet: t2 is a plain shell");
+    expect(hcxSendCalls(s)).toHaveLength(1);
     expect(fs.existsSync(s.tmp + "/hc-prompts.log")).toBe(false);
     const list = cli(s, ["list"], { HERDR_PANE_ID: "", HC_TERMINAL_ID: "" });
     expect(list.out).toContain("t2  kind=shell");
@@ -1342,6 +1354,7 @@ describe("peers 0.1.11 fewer calls, timeouts, lighter SQLite", () => {
     wrap("herdr", "");
     wrap("hc", "");
     wrap("herdr-app", "");
+    wrap("hcx", "");
     return { tmp: s.tmp, bin: s.bin, squad: s.squad, calls, prompts: s.prompts, hcPrompts: s.hcPrompts };
   }
 
@@ -1356,7 +1369,7 @@ describe("peers 0.1.11 fewer calls, timeouts, lighter SQLite", () => {
       .split("\n")
       .map((l) => l.trim())
       .filter((l) => l !== "")
-      .filter((l) => !l.includes("agent prompt") && !l.includes("hc send"));
+      .filter((l) => !l.includes("agent prompt") && !l.includes("hc send") && !l.includes("hcx send"));
   }
 
   test("a send makes at most 8 lookup calls before delivery", () => {
@@ -1373,7 +1386,7 @@ describe("peers 0.1.11 fewer calls, timeouts, lighter SQLite", () => {
     expect(lookups.filter((l) => l.startsWith("herdr-app ls")).length).toBeLessThanOrEqual(1);
   });
 
-  test("a hanging hc send times out as a failed notification, exit 2", async () => {
+  test("a hanging hcx send times out as a failed notification, exit 2", async () => {
     const s = setup();
     fs.writeFileSync(s.tmp + "/agents.json", JSON.stringify({ id: "cli:agent:list", error: { code: "server_not_running" } }));
     fs.writeFileSync(
@@ -1386,10 +1399,10 @@ describe("peers 0.1.11 fewer calls, timeouts, lighter SQLite", () => {
       }),
     );
     fs.writeFileSync(
-      path.join(s.bin, "hc"),
-      `#!/bin/bash\nif [ "$1" = "ls" ]; then cat "${s.tmp}/hc.json"; exit 0; fi\nif [ "$1" = "get" ]; then printf '%s\\n' '{"foreground":{"name":"zsh"}}'; exit 0; fi\nif [ "$1" = "send" ]; then sleep 30; exit 0; fi\necho "unexpected hc call: $*" >&2; exit 9\n`,
+      path.join(s.bin, "hcx"),
+      `#!/bin/bash\nprintf 'CALL:%s\\n' "$*" >>"${s.tmp}/hcx-calls.log"\nif [ "$1" = "--version" ]; then cat "${s.tmp}/hcx-version.json"; exit 0; fi\nif [ "$1" = "send" ]; then printf '%s\\n' "$*" >>"${s.tmp}/hcx-prompts.log"; sleep 30; exit 0; fi\necho "unexpected hcx call: $*" >&2; exit 9\n`,
     );
-    fs.chmodSync(path.join(s.bin, "hc"), 0o755);
+    fs.chmodSync(path.join(s.bin, "hcx"), 0o755);
     const started = Date.now();
     const r = cli(s, ["send", "t2", "--kind", "request", "--seq", "1", "--body", "Hi."], {
       HERDR_PANE_ID: "",

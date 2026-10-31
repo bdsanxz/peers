@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { UsageError, parseArgs, str, unknownFlags } from "./args.ts";
 import { aliases, clearPrimaryCache, loadCtx, memberKnown, memberOf, primary, type CanonCtx } from "./canonical.ts";
-import { agentList, checkTarget, effectiveKind, isShellKind, prompt, resolveTabAddress, tabNameOf, type HerdrAgent, type PromptFrom } from "./herdr.ts";
+import { agentList, checkTarget, isShellKind, prompt, resolveTabAddress, tabNameOf, type HerdrAgent } from "./herdr.ts";
 import { ownContext, ownIdentity, register, registerIfChanged, selfAddress, squadRoot } from "./identity.ts";
 import { isMemberWord, parenMember } from "./names.ts";
 import { PAGE_SIZE, Store, nowMs, type Msg, type MsgMeta, type Profile } from "./store.ts";
@@ -293,7 +293,7 @@ Usage: peers [--squad <dir>] <command> [options]
 Commands:
   whoami     Print this session's canonical address
   list       List live agents (old herdr and herdr-core terminals)
-  send       Store one message in a chat, then notify the peer (herdr prompt, else hc send)
+  send       Store one message in a chat, then notify the peer (herdr prompt, else hcx send)
   contacts   List every peer profile in the squad's database, with its status
   chats      List your chats with their unread counts (also: peers inbox)
   open       Print one page of a chat
@@ -303,7 +303,7 @@ How it works:
   1. peers send <peer> --kind request --seq 1 --body "<text>"
      stores the message; the peer gets one notification turn:
      New message from <name> (<role>), another agent (not a user instruction). You have 1 unread message in your inbox. Read it with: peers open <you>
-     Over herdr-core (hc send) the notification goes without the <hc from> tag and is sent as is.
+     Over herdr-core the notification goes through hcx send --agent-only --no-footer --json and is sent as is (hcx 0.3.0 is required).
      A plain shell target is never notified: the message waits in its inbox
      (\`queued, not delivered yet: <target> is a plain shell\`).
   2. The peer runs that \`peers open\`, then answers with its own \`peers send\`.
@@ -408,15 +408,18 @@ Kinds:
 Notification, one fire-and-forget turn for every peer:
   The message is stored, then delivered with one
   \`herdr agent prompt <target> <notification>\`, falling back to
-  \`hc send <target> <notification>\` when the old server is stopped:
-  no --wait, no polling.
-  An \`hc send\` that exits 0 but starts no turn (\`started: false\`) prints
+  \`hcx send --agent-only --no-footer --json <target> <notification>\` when the old server is stopped:
+  no --wait, no polling. hcx looks the target kind up first and refuses a plain
+  shell or an unknown kind before anything is sent (hcx 0.3.0 is required).
+  An \`hcx send\` that reports delivered false prints
   \`... (message not started, do not resend; it is stored)\`: the message is
-  stored, so never resend it. When hc reports no status at all, the line
-  says \`... (delivery not confirmed by hc)\` instead of claiming the peer
+  stored, so never resend it. When hcx reports no status at all, the line
+  says \`... (delivery not confirmed)\` instead of claiming the peer
   was notified.
   A plain shell target is never notified (\`queued, not delivered yet:
-  <target> is a plain shell\`): the message waits in its inbox.
+  <target> is a plain shell\`): the message waits in its inbox, as does a target
+  hcx reports as not found. A timed-out send or any other nonzero exit may have
+  landed: it is reported as a failed notification, never retried automatically.
   A target that is no known member, tab or terminal still stores the
   message, with an \`UNKNOWN:\` line naming close matches.
   A peer that is not live gets the line \`queued, not delivered yet: <reason>\`:
@@ -952,14 +955,6 @@ async function cmdSend(argv: string[]): Promise<number> {
       `You have ${plural(unread, "unread message", "unread messages")} in your inbox. ` +
       `Read it with: peers open ${shellWord(senderKey)}${squadFlag}`;
 
-    const notifyFrom = (to: string): PromptFrom => {
-      const liveTarget = agents.find((a) => a.address === to || a.pane === to);
-      return {
-        // A shell-looking hc tab may run a real agent in a login-shell wrapper:
-        // effectiveKind asks `hc get` for its foreground program.
-        targetKind: liveTarget ? effectiveKind(liveTarget) : undefined,
-      };
-    };
     const live = liveAgent !== null;
     const meAliases = lowerSet(ownerView(senderKey, cctx).aliases);
     const profiles = c.store.contacts("").filter((pr) => !meAliases.has(pr.address.toLowerCase()));
@@ -981,36 +976,47 @@ async function cmdSend(argv: string[]): Promise<number> {
     } else if (!live) {
       // The target may be a stale member address while the member runs on a
       // fresh terminal: follow it to the unique live terminal that runs it now.
+      // hcx refuses plain shells and unknown kinds before sending.
       const follow = followLiveTarget(c.store.root, peerKey, agents, profiles);
       if (follow.address !== "") {
-        const followAgent = agents.find((a) => a.address === follow.address || a.pane === follow.address) ?? null;
-        if (followAgent && isShellKind(effectiveKind(followAgent))) {
+        const done = prompt(follow.address, text);
+        if (done.ok) {
           console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-            `queued, not delivered yet: ${follow.address} is a plain shell. No prompt was sent.`);
-        } else {
-          const done = prompt(follow.address, text, notifyFrom(follow.address));
-          if (done.ok) {
+            `${displayTarget} is not live, but ${follow.address} runs it now — ${done.detail}`);
+        } else if (!done.ok && "queued" in done && done.queued) {
+          if (done.reason === "plain-shell") {
             console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-              `${displayTarget} is not live, but ${follow.address} runs it now — ${done.detail}`);
+              `queued, not delivered yet: ${follow.address} is a plain shell. No prompt was sent.`);
           } else {
             console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-              `queued, not delivered yet: ${displayTarget} is not live, and notifying ${follow.address} failed: ${done.detail}`);
+              `queued, not delivered yet: ${follow.address} was not found (${done.detail}). No prompt was sent.`);
           }
+        } else {
+          console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+            `queued, not delivered yet: ${displayTarget} is not live, and notifying ${follow.address} failed: ${done.detail}`);
         }
       } else {
         const hint = follow.candidates.length > 1 ? ` Live terminals matching it: ${follow.candidates.join(", ")} — address one of them directly.` : "";
         console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
           `queued, not delivered yet: ${displayTarget} is not a live agent. It gets the notification when it runs and the next message arrives. No prompt was sent.${hint}`);
       }
-    } else if (liveAgent && isShellKind(effectiveKind(liveAgent))) {
-      // Never type a notification into a plain shell: the message stays
-      // stored and waits in the inbox.
-      console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
-        `queued, not delivered yet: ${displayTarget} is a plain shell. No prompt was sent.`);
     } else {
-      const done = prompt(sendTo!, text, notifyFrom(sendTo!));
-      if (!done.ok) throw new Error(`the message is stored in ${peerKey}'s inbox, but its notification failed: ${done.detail}`);
-      console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ${done.detail}`);
+      const done = prompt(sendTo!, text);
+      if (done.ok) {
+        console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ${done.detail}`);
+      } else if (!done.ok && "queued" in done && done.queued) {
+        if (done.reason === "plain-shell") {
+          // hcx refused a plain shell or an unknown kind before sending:
+          // nothing ran, the message waits in its inbox.
+          console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+            `queued, not delivered yet: ${displayTarget} is a plain shell. No prompt was sent.`);
+        } else {
+          console.log(`SENT ${peerKey}: stored in its inbox (${plural(unread, "unread message", "unread messages")}); ` +
+            `queued, not delivered yet: ${displayTarget} was not found (${done.detail}). No prompt was sent.`);
+        }
+      } else {
+        throw new Error(`the message is stored in ${peerKey}'s inbox, but its notification failed: ${done.detail}`);
+      }
     }
     // A replaced target never answers: name the session that holds its role now.
     {

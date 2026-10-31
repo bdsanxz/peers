@@ -1,8 +1,10 @@
-// Delivery routes: `herdr agent prompt` on the old herdr server, `hc send`
-// on the new herdr-core. Every notification between sessions is one
+// Delivery routes: `herdr agent prompt` on the old herdr server, `hcx send`
+// over herdr-core. Every notification between sessions is one
 // fire-and-forget prompt into the peer's input, with no `--wait`. A failed
 // prompt never fails the send: the message stays in the peer's inbox and the
-// SENT line says the notification failed.
+// SENT line says the notification failed. The herdr-core route always goes
+// through `hcx send --agent-only --no-footer --json`, which refuses plain
+// shells and unknown kinds before sending.
 
 import { spawnSync } from "node:child_process";
 import { parenMember } from "./names.ts";
@@ -147,58 +149,16 @@ export function agentList(): HerdrAgent[] {
   return out;
 }
 
-/** What peers knows about a notification target, for the hc send route. */
-export interface PromptFrom {
-  /** What kind of agent the receiver runs; a plain shell keeps the tagged send. */
-  targetKind?: string;
-}
-
 const SHELLS = new Set(["zsh", "sh", "bash", "fish", "dash", "ksh", "nu", "pwsh"]);
 
-/** Agent programs peers recognises in the foreground of a shell wrapper: a
- * shell kind becomes the foreground program only when it names one of these.
- * Anything else the shell runs (such as `vim` or `python`) stays a shell tab. */
-const KNOWN_FOREGROUND_AGENTS = new Set(["opencode"]);
-
 /** Whether a kind is a plain shell: a shell name, or an unknown kind (empty
- * or missing). Unknown kinds are never treated as agents. */
+ * or missing). Unknown kinds are never treated as agents. Only used to label
+ * `peers list` rows from `hc ls` data; notification routing leaves the shell
+ * check to `hcx send --agent-only`. */
 export function isShellKind(kind: string | undefined | null): boolean {
   if (kind === undefined || kind === null) return true;
   const k = kind.trim().toLowerCase();
   return k === "" || SHELLS.has(k);
-}
-
-/** Per-run cache of `hc get` foreground lookups: one lookup per address. */
-const foregroundOf = new Map<string, string | null>();
-
-/** The foreground program `hc get <address>` reports for a terminal: the
- * basename of `foreground.name`, in lower case. Null when the lookup fails,
- * the JSON is unparseable, or the name is empty. Only the address form from
- * `hc ls --json` is passed: a name often returns not_found. */
-function hcForeground(address: string): string | null {
-  if (foregroundOf.has(address)) return foregroundOf.get(address)!;
-  let fg: string | null = null;
-  const v = hcJson(["get", address]) as { foreground?: { name?: unknown } } | null;
-  const name = v?.foreground?.name;
-  if (typeof name === "string") {
-    const base = (name.split("/").pop() ?? "").trim().toLowerCase();
-    fg = base === "" ? null : base;
-  }
-  foregroundOf.set(address, fg);
-  return fg;
-}
-
-/** The kind peers treats a live target as. hc lists a tab that runs an agent
- * inside a login-shell wrapper as a plain shell (`agent: "zsh"`), so a shell
- * kind is checked against the foreground program `hc get` reports: only a
- * known agent foreground such as `opencode` is the real kind. A failed
- * lookup, a missing or shell foreground, or any other program (such as `vim`)
- * keeps the shell kind. */
-export function effectiveKind(agent: HerdrAgent): string {
-  if (!SHELLS.has(agent.kind.trim().toLowerCase())) return agent.kind;
-  const fg = hcForeground(agent.pane);
-  if (fg === null || !KNOWN_FOREGROUND_AGENTS.has(fg)) return agent.kind;
-  return fg;
 }
 
 /** The Herdr app tab that holds a terminal, or null when the app is absent. */
@@ -276,68 +236,120 @@ export function resolveTabAddress(name: string, reserved: boolean): TabResolutio
   return {};
 }
 
-/** How hc's send result reads: `confirmed` when a turn started, `not-started`
- * when hc confirms the send started no turn (`started: false`, which must
- * never read as confirmed), and `unconfirmed` when hc reports no status at
- * all, as for an opencode TUI. */
-type DeliveryConfirmation = "confirmed" | "not-started" | "unconfirmed";
-
-function hcDelivery(json: unknown): DeliveryConfirmation {
-  if (typeof json !== "object" || json === null) return "unconfirmed";
-  const started = (json as Record<string, unknown>)["started"];
-  if (started === true) return "confirmed";
-  if (started === false) return "not-started";
-  return "unconfirmed";
-}
-
 function timedOut(p: { error?: unknown }): boolean {
   const e = p.error as { code?: unknown } | undefined;
   return !!e && (e.code === "ETIMEDOUT" || String((e as Error).message ?? "").includes("ETIMEDOUT"));
 }
 
-function hcSend(target: string, text: string, env: NodeJS.ProcessEnv): { ok: boolean; detail: string } {
+/** hcx is a required dependency for notifications over herdr-core. Checked
+ * once per process with `hcx --version --json`: contract >= 1 with the
+ * `agent-only` and `no-footer` capabilities. */
+let hcxCheckCache: { ok: boolean; hint: string } | null = null;
+
+function hcxCheck(): { ok: boolean; hint: string } {
+  if (hcxCheckCache !== null) return hcxCheckCache;
   try {
-    const p = spawnSync("hc", ["send", target, text], { encoding: "utf8", env, timeout: SEND_TIMEOUT_MS });
-    if (timedOut(p)) return { ok: false, detail: `hc send to ${target} failed: timed out after ${SEND_TIMEOUT_MS / 1000} s` };
-    if (p.status === 0) {
-      let confirmation: DeliveryConfirmation = "unconfirmed";
-      try {
-        confirmation = hcDelivery(JSON.parse(p.stdout as string));
-      } catch {
-        confirmation = "unconfirmed";
-      }
-      const detail = `notified via hc send to ${target}`;
-      if (confirmation === "confirmed") return { ok: true, detail };
-      if (confirmation === "not-started")
-        return { ok: true, detail: `${detail} (message not started, do not resend; it is stored)` };
-      return { ok: true, detail: `${detail} (delivery not confirmed by hc)` };
+    if (Bun.which("hcx") === null) {
+      hcxCheckCache = { ok: false, hint: "install hcx >= 0.3.0" };
+      return hcxCheckCache;
     }
-    const err = (p.stderr as string).trim();
-    if (err === "") {
-      const out = (p.stdout as string).trim();
-      const tail = out === "" ? "" : `: ${out.split("\n")[0]}`;
-      return { ok: false, detail: `hc send to ${target} failed: exit ${p.status}${tail}` };
+    const p = spawnSync("hcx", ["--version", "--json"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: LOOKUP_TIMEOUT_MS,
+    });
+    if (p.status !== 0) {
+      hcxCheckCache = { ok: false, hint: "install hcx >= 0.3.0" };
+      return hcxCheckCache;
     }
-    return { ok: false, detail: `hc send to ${target} failed: ${err.split("\n")[0]}` };
-  } catch (e) {
-    return { ok: false, detail: `hc send to ${target} failed: ${e instanceof Error ? e.message : String(e)}` };
+    const v = JSON.parse(p.stdout as string) as { contract?: unknown; capabilities?: unknown };
+    const caps = Array.isArray(v.capabilities) ? (v.capabilities as unknown[]) : [];
+    if (typeof v.contract !== "number" || v.contract < 1 || !caps.includes("agent-only") || !caps.includes("no-footer")) {
+      hcxCheckCache = { ok: false, hint: "install hcx >= 0.3.0" };
+      return hcxCheckCache;
+    }
+    hcxCheckCache = { ok: true, hint: "" };
+    return hcxCheckCache;
+  } catch {
+    hcxCheckCache = { ok: false, hint: "install hcx >= 0.3.0" };
+    return hcxCheckCache;
   }
 }
 
-/** One fire-and-forget prompt over herdr-core. Never waits for an answer.
- * With `from`, it goes without HC_TERMINAL_ID, so hc adds no <hc from> tag, and
- * the body is sent as is. A failed untagged send is retried the old way. An
- * unknown or shell target kind keeps the tagged send. */
-function hcPrompt(target: string, text: string, from?: PromptFrom): { ok: boolean; detail: string } {
-  if (from && !isShellKind(from.targetKind)) {
-    const env = { ...process.env };
-    delete env.HC_TERMINAL_ID;
-    const plain = hcSend(target, text, env);
-    if (plain.ok) return plain;
-    // A hung helper will hang the retry too: report the timeout at once.
-    if (plain.detail.includes("timed out")) return plain;
+/** The result of one notification attempt: notified, queued (a plain shell or
+ * a target hcx reports as not found: nothing ran), or failed. */
+export type NotifyResult =
+  | { ok: true; detail: string }
+  | { ok: false; detail: string; queued: true; reason: "plain-shell" | "not-found" }
+  | { ok: false; detail: string };
+
+function hcxErrorKind(chunk: string): { kind: string; message: string; hint: string } | null {
+  const texts = [chunk, ...chunk.split("\n")];
+  for (const c of texts) {
+    const t = c.trim();
+    if (t === "") continue;
+    try {
+      const v = JSON.parse(t) as { error?: { kind?: unknown; message?: unknown; hint?: unknown } };
+      const e = v?.error;
+      if (e && typeof e.kind === "string")
+        return {
+          kind: e.kind,
+          message: typeof e.message === "string" ? e.message : "",
+          hint: typeof e.hint === "string" ? e.hint : "",
+        };
+    } catch {
+      // not JSON: keep looking
+    }
   }
-  return hcSend(target, text, process.env);
+  return null;
+}
+
+/** One fire-and-forget notification over herdr-core through hcx, with argv
+ * and no shell: `hcx send --agent-only --no-footer --json <address> <text>`.
+ * hcx looks the kind up first and refuses a plain shell or an unknown kind
+ * before sending (kind `plain_shell`, exit 4). Never retried: a timeout or
+ * any other nonzero exit after the send may have landed. */
+function hcxNotify(target: string, text: string): NotifyResult {
+  try {
+    const p = spawnSync("hcx", ["send", "--agent-only", "--no-footer", "--json", target, text], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: SEND_TIMEOUT_MS,
+    });
+    if (timedOut(p)) return { ok: false, detail: `hcx send to ${target} failed: timed out after ${SEND_TIMEOUT_MS / 1000} s` };
+    if (p.status === 0) {
+      let delivered: boolean | null = null;
+      try {
+        const v = JSON.parse(p.stdout as string) as Record<string, unknown>;
+        const d = (v as { delivered?: unknown }).delivered;
+        if (typeof d === "boolean") delivered = d;
+        else delivered = null;
+      } catch {
+        delivered = null;
+      }
+      const base = `notified via hcx send to ${target}`;
+      if (delivered === true) return { ok: true, detail: base };
+      if (delivered === false) return { ok: true, detail: `${base} (message not started, do not resend; it is stored)` };
+      return { ok: true, detail: `${base} (delivery not confirmed)` };
+    }
+    const found = hcxErrorKind((p.stderr as string) ?? "") ?? hcxErrorKind((p.stdout as string) ?? "");
+    if (found) {
+      if (found.kind === "plain_shell")
+        return { ok: false, queued: true, reason: "plain-shell", detail: found.message || `tab "${target}" is a plain shell` };
+      if (found.kind === "not_found")
+        return { ok: false, queued: true, reason: "not-found", detail: found.message || `target "${target}" not found` };
+      const tail = found.message ? `: ${found.message}` : "";
+      const hint = found.hint ? ` (${found.hint})` : "";
+      return { ok: false, detail: `hcx send to ${target} failed: exit ${p.status}${tail}${hint}` };
+    }
+    const err = ((p.stderr as string) ?? "").trim();
+    if (err !== "") return { ok: false, detail: `hcx send to ${target} failed: ${err.split("\n")[0]}` };
+    const out = ((p.stdout as string) ?? "").trim();
+    const tail = out === "" ? "" : `: ${out.split("\n")[0]}`;
+    return { ok: false, detail: `hcx send to ${target} failed: exit ${p.status}${tail}` };
+  } catch (e) {
+    return { ok: false, detail: `hcx send to ${target} failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
 }
 
 function herdrPrompt(target: string, text: string): { ok: boolean; detail: string } {
@@ -358,18 +370,21 @@ function herdrPrompt(target: string, text: string): { ok: boolean; detail: strin
   }
 }
 
-/** One fire-and-forget prompt, over old herdr first, then herdr-core. Never waits for an answer. */
-export function prompt(target: string, text: string, from?: PromptFrom): { ok: boolean; detail: string } {
+/** One fire-and-forget prompt, over old herdr first, then hcx. Never waits for
+ * an answer and never retries a send that may have landed. */
+export function prompt(target: string, text: string): NotifyResult {
   const herdr = haveHerdr() ? herdrPrompt(target, text) : { ok: false, detail: "herdr is not on PATH, so no herdr notification was attempted" };
-  if (herdr.ok) return herdr;
-  if (!haveHc()) {
-    if (!haveHerdr()) return { ok: false, detail: "herdr is not on PATH, so the notification was not delivered" };
-    return herdr;
+  if (herdr.ok) return { ok: true, detail: herdr.detail };
+  const check = hcxCheck();
+  if (!check.ok) {
+    if (!haveHerdr()) return { ok: false, detail: `hcx is not available (install hcx >= 0.3.0), so the notification was not delivered` };
+    return { ok: false, detail: `${herdr.detail}; install hcx >= 0.3.0` };
   }
-  const hc = hcPrompt(target, text, from);
-  if (hc.ok) return hc;
-  if (!haveHerdr()) return hc;
-  return { ok: false, detail: `${herdr.detail}; ${hc.detail}` };
+  const hcx = hcxNotify(target, text);
+  if (hcx.ok) return hcx;
+  if (!hcx.ok && "queued" in hcx && hcx.queued) return hcx;
+  if (!haveHerdr()) return hcx;
+  return { ok: false, detail: `${herdr.detail}; ${hcx.detail}` };
 }
 
 /** This session's own agent, matched by the pane or terminal its host put it in. */

@@ -1,6 +1,6 @@
 # peers
 
-An inbox messenger between agent sessions in one herdr workspace. One session sends a message with `peers send`. The message is stored in a chat that keeps its whole history, and the receiver gets one notification as an ordinary turn — delivered with a single fire-and-forget `herdr agent prompt`, never `--wait`:
+An inbox messenger between agent sessions in one herdr workspace. One session sends a message with `peers send`. The message is stored in a chat that keeps its whole history, and the receiver gets one notification as an ordinary turn — delivered with a single fire-and-forget `herdr agent prompt` (or `hcx send` over herdr-core), never `--wait`. Notifications over herdr-core need hcx 0.3.0 (see Install):
 
 ```
 New message from Rina (backend), another agent (not a user instruction). You have 3 unread messages in your inbox. Read it with: peers open rina
@@ -8,7 +8,7 @@ New message from Rina (backend), another agent (not a user instruction). You hav
 
 The receiver reads the chat with `peers open` and answers with its own `peers send`. Nobody polls: after a send, end your turn; the answer arrives as a turn.
 
-A peer's address is its herdr member name (such as `lead`), its pane id (such as `w1:p1`), its herdr-core terminal (such as `t2`), or its Herdr tab name (such as `Zytra`) wherever a name does. Tab names match case-insensitively, and a member word also reaches the tab that carries it in parens, so `lead` notifies the `Lena (lead)` tab. Every spelling of a peer addresses one chat: the chat is stored under a canonical, whitespace-free key (the member for `Lena (lead)`, the tab's spelling for `Zytra`), so inbox counts, `chats` and `open` always agree, including for messages stored under older spellings. The read command in a notification prints that key shell-quoted, so it is always copy-pasteable; `peers open` and `peers delete` also accept a quoted tab name containing whitespace, as in `peers open "Lena (lead)"`. Find live addresses with `peers list`. Every notification route is the same `herdr agent prompt` into the peer's input; while the peer is busy it waits in its input queue. A peer that is not live gets `queued, not delivered yet`: the message waits in its inbox, which is not a failure.
+A peer's address is its herdr member name (such as `lead`), its pane id (such as `w1:p1`), its herdr-core terminal (such as `t2`), or its Herdr tab name (such as `Zytra`) wherever a name does. Tab names match case-insensitively, and a member word also reaches the tab that carries it in parens, so `lead` notifies the `Lena (lead)` tab. Every spelling of a peer addresses one chat: the chat is stored under a canonical, whitespace-free key (the member for `Lena (lead)`, the tab's spelling for `Zytra`), so inbox counts, `chats` and `open` always agree, including for messages stored under older spellings. The read command in a notification prints that key shell-quoted, so it is always copy-pasteable; `peers open` and `peers delete` also accept a quoted tab name containing whitespace, as in `peers open "Lena (lead)"`. Find live addresses with `peers list`. Every notification route is one fire-and-forget turn into the peer's input (`herdr agent prompt`, or `hcx send --agent-only --no-footer --json` over herdr-core); while the peer is busy it waits in its input queue. A peer that is not live gets `queued, not delivered yet`: the message waits in its inbox, which is not a failure.
 
 ## Install
 
@@ -44,6 +44,16 @@ cp dist/peers.js ~/.local/bin/peers
 
 Run `peers --version` to check that it runs. No compile step: `dist/peers.js` is `src/` bundled with `bun build`, and Bun runs it.
 
+### hcx for notifications over herdr-core
+
+Notifications to herdr-core terminals go through hcx 0.3.0, which is required:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bdsanxz/hcx/main/install.sh | sh
+```
+
+`peers` calls `hcx send --agent-only --no-footer --json <address> "<text>"`. It checks `hcx --version --json` once per process (contract 1 with the `agent-only` and `no-footer` capabilities). Without a new enough hcx the notification is reported as not delivered with the hint `install hcx >= 0.3.0`; the message stays stored. hcx refuses plain shells and unknown kinds before sending, so nothing is ever typed into a shell.
+
 ### Uninstall
 
 ```bash
@@ -61,7 +71,7 @@ Agents use `peers` through the `peers` agent skill, which tells them when to mes
 | --- | --- |
 | `peers whoami` | Prints this session's canonical address, such as `lead` (whitespace-free, feeds back into every command). |
 | `peers list` | Lists live herdr agents. Plain shells list as `kind=shell` and are never notified. |
-| `peers send <member> --kind <kind> --seq <n> --body TEXT` | Stores a message and notifies the peer with one `herdr agent prompt`. The body may come on stdin instead of `--body`. |
+| `peers send <member> --kind <kind> --seq <n> --body TEXT` | Stores a message and notifies the peer with one `herdr agent prompt` (or `hcx send` over herdr-core, which needs hcx 0.3.0). The body may come on stdin instead of `--body`. |
 | `peers contacts` | Lists every peer profile in the squad's database, with its status: `live`, `offline`, or `replaced` by the session that holds its role now. |
 | `peers chats` (or `peers inbox`) | Lists your chats with their unread counts, and whether the peer has read your last message. |
 | `peers open <member> [--page N]` | Prints one page of a chat: 20 messages, with page 1 the newest. It marks the messages it prints as read. Any spelling opens the same merged chat; quote tab names with spaces. |
@@ -82,13 +92,13 @@ Conversations and peer profiles live in one SQLite database per squad, at `~/.lo
 - **Messages.** Each message is stored once, under the sender's and recipient's canonical keys.
 - **One chat per peer.** Every spelling of a peer (member name, role, tab name, terminal, pane id, stale address of a replaced session) maps to one canonical, whitespace-free key. Reads merge all spellings, so chats never fragment and rows stored under older spellings stay readable without any migration.
 - **Deleting a chat** records how far the deleter's view is cleared. The other side's view stays unchanged.
-- **No notification queue.** Delivery is one `herdr agent prompt` at send time. When the peer is not live or the prompt fails, the message simply waits in the inbox; the next send's notification carries the waiting count. Asking for help never runs anything: `--help` or `-h` anywhere before `--` prints that command's help, even after a target.
+- **No notification queue.** Delivery is one `herdr agent prompt` (or `hcx send` over herdr-core) at send time. When the peer is not live or the prompt fails, the message simply waits in the inbox; the next send's notification carries the waiting count. Asking for help never runs anything: `--help` or `-h` anywhere before `--` prints that command's help, even after a target.
 - **Fewer subprocess calls.** One command reads live agents and Herdr tabs once per process (no `sh -c command -v`); a `send` makes about three lookup calls before delivery.
 - **Timeouts.** Lookups wait up to 5 s and notifications up to 10 s; a timed-out notification is reported as a failed notification, with the message stored.
 - **Lighter SQLite open.** `busy_timeout` comes before `journal_mode`, the schema runs once, `chats`/`open`/`contacts` write no profile unless it changed, and one `send` commits its profiles plus its message in a single transaction, so concurrent senders queue instead of failing with `database is locked`.
 - **Lighter reads.** Chat lists count metadata only and load the last message body per chat; `open` loads only the page it prints.
 
-- **hc notifications are untagged.** Over `hc send` the notification is sent without `HC_TERMINAL_ID`, so hc adds no `<hc from>` tag, and the body is sent as is; it already says it comes from another agent, not a user instruction. The sender's display name comes from `herdr-app ls` (the display name stated with `--name` wins; the address is the last fallback). A tab with several terminals is notified on the one with the `app` field, and renaming a tab starts a new chat. If the untagged send fails, `peers` retries the old tagged send. An `hc send` that exits 0 but starts no turn (`started: false`) is never reported as confirmed: the `SENT` line says `(message not started, do not resend; it is stored)`, and the message is never resent. When hc reports no status at all, the line says `(delivery not confirmed by hc)` instead of claiming the peer was notified. A shell-looking tab is checked against `hc get`: when its foreground program is a known agent running inside a login-shell wrapper (such as `opencode`), it gets the untagged send like any other agent. A plain shell — a shell foreground (such as `vim` or `zsh`), an unknown kind, or no `hc get` answer — is never notified: the message waits in its inbox (`queued, not delivered yet: <target> is a plain shell`), because typing it there would run it as a command. A `send` to a target that is no known member, tab or terminal still stores the message, with an `UNKNOWN:` line naming close matches.
+- **hcx notifications are raw and agent-only.** Over herdr-core the notification goes through `hcx send --agent-only --no-footer --json <address> "<text>"`: no footer and no tag, the body sent as is; it already says it comes from another agent, not a user instruction. hcx looks the kind up first and refuses a plain shell or an unknown kind before sending (exit 4, `queued, not delivered yet: <target> is a plain shell`), so nothing is ever typed into a shell. The sender's display name comes from `herdr-app ls` (the display name stated with `--name` wins; the address is the last fallback). A tab with several terminals is notified on the one with the `app` field, and renaming a tab starts a new chat. An `hcx send` that reports `delivered: false` is never reported as confirmed: the `SENT` line says `(message not started, do not resend; it is stored)`, and the message is never resent. When hcx reports `delivered: null`, the line says `(delivery not confirmed)` instead of claiming the peer was notified. A `timeout` or any other nonzero exit after the send may have landed: it is reported as a failed notification, never retried automatically. A target hcx reports as not found is queued. A `send` to a target that is no known member, tab or terminal still stores the message, with an `UNKNOWN:` line naming close matches.
 
 Environment variables:
 
@@ -108,7 +118,7 @@ bun test
 bun run build
 ```
 
-The tests in `test/run.test.ts` run the CLI against a stub `herdr` (one fake `agent list` and an `agent prompt` that records its calls), a stub `hc`, and a stub `herdr-app` that lists one tab. Each test gets its own temporary home and cache.
+The tests in `test/run.test.ts` run the CLI against a stub `herdr` (one fake `agent list` and an `agent prompt` that records its calls), a stub `hc` (only `ls` is used; `send`/`get` must never run for a notification), a stub `hcx` (records argv and prints JSON for delivered true/false/null, plain_shell exit 4, timeout, missing and old versions), and a stub `herdr-app` that lists one tab. Each test gets its own temporary home and cache.
 
 ### Releasing
 
