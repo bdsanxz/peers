@@ -235,8 +235,7 @@ function mergedChats(store: Store, cctx: CanonCtx, ownerAliases: string[]): Merg
   const out: MergedChat[] = [];
   for (const [, g] of groups) {
     const last = lastById.get(g.lastId)!;
-    const peerAliases = [...new Set([...aliases(g.display, cctx), ...aliases(last.sender, cctx), ...aliases(last.recipient, cctx)])];
-    out.push({ peer: g.display, total: g.total, unread: g.unread, last, profile: bestProfile(cctx, peerAliases) });
+    out.push({ peer: g.display, total: g.total, unread: g.unread, last, profile: bestProfile(cctx, aliases(g.display, cctx)) });
   }
   out.sort((a, b) => b.last.id - a.last.id);
   return out;

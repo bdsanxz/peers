@@ -1529,3 +1529,45 @@ describe("peers 0.1.11 fewer calls, timeouts, lighter SQLite", () => {
     expect(page1.out).toContain("Seed message 40 of 40.");
   });
 });
+
+describe("peers 0.3.1 chats peer names (ISSUES row 26)", () => {
+  test("chats and chats --json show the peer's name and role, not the caller's", () => {
+    const s = setup();
+    fs.writeFileSync(
+      s.squad + "/roster.json",
+      JSON.stringify({
+        squad: "livetest",
+        members: [
+          { name: "cy", display_name: "Cy" },
+          { name: "di", display_name: "Di" },
+          { name: "bo", display_name: "Bo" },
+        ],
+      }),
+    );
+    const asCy = { PEERS_SELF: "cy", HERDR_PANE_ID: "", HC_TERMINAL_ID: "", PEERS_ROLE: "cy", PEERS_NAME: "Cy" };
+    const asDi = { PEERS_SELF: "di", HERDR_PANE_ID: "", HC_TERMINAL_ID: "", PEERS_ROLE: "di", PEERS_NAME: "Di" };
+    const asBo = { PEERS_SELF: "bo", HERDR_PANE_ID: "", HC_TERMINAL_ID: "", PEERS_ROLE: "bo", PEERS_NAME: "Bo" };
+    expect(cli(s, ["send", "di", "--kind", "request", "--seq", "1", "--body", "Hi Di."], asCy).code).toBe(0);
+    expect(cli(s, ["send", "cy", "--kind", "completion", "--seq", "1", "--body", "Hi Cy."], asDi).code).toBe(0);
+    expect(cli(s, ["send", "bo", "--kind", "request", "--seq", "2", "--body", "Hi Bo."], asCy).code).toBe(0);
+    // Every peer registers its own profile, as in the live squad; then the
+    // caller runs again, so its profile is newest and must still not leak
+    // into the peer rows.
+    expect(cli(s, ["whoami"], asBo).code).toBe(0);
+    expect(cli(s, ["whoami"], asCy).code).toBe(0);
+    const chats = cli(s, ["chats"], asCy);
+    expect(chats.code).toBe(0);
+    expect(chats.out).toContain('di  name="Di"');
+    expect(chats.out).toContain('bo  name="Bo"');
+    expect(chats.out).not.toContain('di  name="Cy"');
+    expect(chats.out).not.toContain('bo  name="Cy"');
+    const j = cli(s, ["chats", "--json"], asCy);
+    expect(j.code).toBe(0);
+    const doc = JSON.parse(j.out) as { chats: { peer: string; name: string; role: string }[] };
+    const byPeer = new Map(doc.chats.map((c) => [c.peer, c]));
+    expect(byPeer.get("di")!.name).toBe("Di");
+    expect(byPeer.get("di")!.role).toBe("di");
+    expect(byPeer.get("bo")!.name).toBe("Bo");
+    expect(byPeer.get("bo")!.role).toBe("bo");
+  });
+});
